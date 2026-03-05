@@ -1,38 +1,90 @@
-# Multi-Agent AI Trading System (TypeScript)
+# Vexis Trading Agents
 
-LangGraph-based deterministic pipeline with LLM decision layer:
+Multi-agent crypto trading desk in TypeScript using LangGraph + LLM reasoning, real data providers, and simulated execution.
 
-Market Data -> Analyst Team -> Bullish/Bearish Research -> Debate -> Trader -> Risk -> Portfolio -> Simulated Exchange
+Pipeline:
 
-## Run
+`Market Data -> Analysts -> Bull/Bear Research -> Debate -> Trader -> Risk -> Portfolio -> Simulated Exchange`
+
+## Features
+
+- LangGraph orchestration with strict typed JSON contracts.
+- LLM decision nodes (OpenRouter) with retry + fallback.
+- Real crypto inputs (CCXT market, CoinGecko, Alternative.me, TheNewsAPI).
+- Binance account snapshot integration (spot + USD-M + COIN-M).
+- Binance Spot CCXT action pack (live actions, whitelist guarded).
+- Observability stack (metrics/logs/alerts, SQLite persistence, health endpoints).
+- Continuous runner with interval + candle alignment + backoff.
+- Unified CLI (`vexis`) with interactive mode.
+
+## Project Structure
+
+```text
+src/
+  agents/     # Analyst/research/trader/risk/portfolio agents
+  core/       # Pipeline, providers, env, telemetry, runner, spot services
+  sim/        # Simulated exchange
+  types/      # Shared domain/contracts/json types
+  utils/      # Reporting and helpers
+```
+
+## Requirements
+
+- Node.js 20+
+- npm 10+
+- Binance API key/secret for account + spot actions
+- OpenRouter API key for LLM-driven nodes
+
+## Installation
 
 ```bash
 npm install
+cp .env.example .env
+```
+
+## Build & Validate
+
+```bash
 npm run build
+npm run validate
+```
+
+## Quick Start
+
+Single cycle:
+
+```bash
 npm start
-# or:
+# or
 node dist/cli.js run --mode paper --asset SOL/USDT --timeframe 1h --limit 50
 ```
 
-## Validation
-
-```bash
-npm run validate
-# or:
-node dist/cli.js validate
-```
-
-## CLI Commands
+Interactive console:
 
 ```bash
 vexis interactive
-vexis run [--asset SYMBOL --timeframe TF --limit N --mode backtest|paper|live-sim --output pretty|json --show-telemetry]
-vexis runner [--asset SYMBOL --timeframe TF --limit N --interval SEC --candle-align true|false --max-backoff SEC --mode ...]
-vexis ops tail [--run-id ... --trace-id ... --since ISO --severity info|warning|critical --limit N --json]
-vexis health [--check healthz|readyz --port N --json]
-vexis account check [--mode ... --json]
-vexis spot buy --symbol BTC/USDT --type market --amount 0.001 [--json]
-vexis spot sell --symbol BTC/USDT --type limit --amount 0.001 --price 90000 [--json]
+```
+
+## CLI Overview
+
+Core commands:
+
+```bash
+vexis run
+vexis runner
+vexis ops tail
+vexis health
+vexis account check
+vexis doctor
+vexis env check
+vexis validate
+```
+
+Spot commands:
+
+```bash
+vexis spot buy --symbol BTC/USDT --type market --amount 0.001
+vexis spot sell --symbol BTC/USDT --type limit --amount 0.001 --price 90000
 vexis spot order get --symbol BTC/USDT --order-id <id>
 vexis spot order cancel --symbol BTC/USDT --order-id <id>
 vexis spot order cancel-all [--symbol BTC/USDT]
@@ -41,20 +93,36 @@ vexis spot orders closed [--symbol BTC/USDT --limit 50]
 vexis spot balance
 vexis spot trades --symbol BTC/USDT [--limit 50]
 vexis spot quote --symbol BTC/USDT [--depth 5]
-vexis doctor [--json]
-vexis env check [--json]
-vexis validate
 ```
 
-## Runtime Modes
+Use `--json` on commands for machine-readable output.
 
-- `PIPELINE_MODE=backtest` (fixture mode)
-- `PIPELINE_MODE=paper` (real crypto data + simulated execution)
-- `PIPELINE_MODE=live-sim` (real crypto data + simulated execution)
-- `OUTPUT_FORMAT=pretty` (default)
-- `OUTPUT_FORMAT=json` (machine-readable raw payload)
+## Interactive UX
 
-## OpenRouter / LLM Config
+`vexis interactive` provides menu-driven workflows:
+
+- `Trading Cycle`: run cycle / start runner
+- `Spot Desk`: buy, sell, order ops, balance, trades, quote
+- `Ops & Health`: ops tail, health check, account check
+- `Admin`: doctor, env check, validate
+
+UX behavior:
+
+- loading indicator + elapsed time on each action
+- symbol and numeric input validation
+- back navigation on each submenu
+
+## Configuration
+
+### Runtime mode
+
+```bash
+PIPELINE_MODE=paper          # backtest | paper | live-sim
+OUTPUT_FORMAT=pretty         # pretty | json
+STRICT_REAL_MODE=true
+```
+
+### LLM (OpenRouter)
 
 ```bash
 OPENROUTER_API_KEY=your_key
@@ -63,7 +131,7 @@ OPENROUTER_MODEL=openai/gpt-4o-mini
 LLM_MAX_RETRIES=2
 ```
 
-## Real Data Provider Config (Crypto)
+### Real data providers
 
 ```bash
 THENEWSAPI_KEY=your_key
@@ -72,10 +140,35 @@ THENEWSAPI_BASE_URL=https://api.thenewsapi.com/v1/news
 ALTERNATIVE_ME_BASE_URL=https://api.alternative.me
 COINGECKO_BASE_URL=https://api.coingecko.com/api/v3
 PROVIDER_CACHE_TTL_SECONDS=300
-STRICT_REAL_MODE=true
 ```
 
-## Observability + Runner Config
+### Binance account snapshot
+
+```bash
+BINANCE_API_KEY=your_key
+BINANCE_API_SECRET=your_secret
+BINANCE_ACCOUNT_ENABLED=true
+BINANCE_ACCOUNT_SCOPE=spot+usdm+coinm
+BINANCE_DEFAULT_EXPOSURE_PCT=8
+BINANCE_DEFAULT_DRAWDOWN_PCT=3
+```
+
+### Binance Spot actions
+
+```bash
+BINANCE_SPOT_ENABLED=true
+BINANCE_SPOT_SYMBOL_WHITELIST=BTC/USDT,ETH/USDT,SOL/USDT
+BINANCE_SPOT_DEFAULT_TIF=GTC
+BINANCE_SPOT_RECV_WINDOW=10000
+```
+
+Notes:
+
+- Spot actions are live by default when enabled.
+- Execution is restricted to symbols in `BINANCE_SPOT_SYMBOL_WHITELIST`.
+- Withdraw/transfer are intentionally not included in this version.
+
+### Observability, health, runner
 
 ```bash
 OBS_PERSIST_ENABLED=true
@@ -83,61 +176,51 @@ OBS_SQLITE_PATH=./data/observability.db
 OBS_RETENTION_DAYS=30
 OBS_CLEANUP_ENABLED=true
 SHOW_TELEMETRY=true
-TELEMETRY_CONSOLE=false
+
+HEALTH_SERVER_ENABLED=true
+HEALTH_SERVER_PORT=8787
 
 RUNNER_ENABLED=true
 RUNNER_INTERVAL_SECONDS=60
 RUNNER_CANDLE_ALIGN=true
 RUNNER_MAX_BACKOFF_SECONDS=900
-
-HEALTH_SERVER_ENABLED=true
-HEALTH_SERVER_PORT=8787
-
-SIM_FEE_BPS=10
-SIM_SLIPPAGE_BPS=5
-SIM_PARTIAL_FILL_ENABLED=true
-
-BINANCE_API_KEY=your_key
-BINANCE_API_SECRET=your_secret
-BINANCE_ACCOUNT_ENABLED=true
-BINANCE_ACCOUNT_SCOPE=spot+usdm+coinm
-BINANCE_DEFAULT_EXPOSURE_PCT=8
-BINANCE_DEFAULT_DRAWDOWN_PCT=3
-
-BINANCE_SPOT_ENABLED=true
-BINANCE_SPOT_SYMBOL_WHITELIST=BTC/USDT,ETH/USDT,SOL/USDT
-BINANCE_SPOT_DEFAULT_TIF=GTC
-BINANCE_SPOT_RECV_WINDOW=10000
 ```
 
-- `OBS_PERSIST_ENABLED=true` stores telemetry + decision logs in SQLite.
-- `RUNNER_ENABLED=true` runs hybrid continuous mode (interval + candle alignment).
-- Backoff policy is automatic on critical failure streak/provider fail-hard.
-- Retention cleanup purges records older than `OBS_RETENTION_DAYS` when `OBS_CLEANUP_ENABLED=true`.
-- `BINANCE_ACCOUNT_ENABLED=true` enables auto portfolio read from Binance spot + USD-M + COIN-M futures.
-- Binance account fetch is fail-hard by default: cycle stops on auth/provider failure.
-- Spot actions are live by default when `BINANCE_SPOT_ENABLED=true`.
-- Spot order execution is restricted to `BINANCE_SPOT_SYMBOL_WHITELIST`.
-- Health endpoints:
-  - `GET /healthz` liveness
-  - `GET /readyz` provider/LLM health + runner state snapshot
+## Health & Ops
 
-## Ops Tail
+Health endpoints:
 
-```bash
-npm run ops:tail
-```
+- `GET /healthz` liveness
+- `GET /readyz` readiness snapshot (providers/LLM/runner)
 
-Flags:
+Ops tail:
 
 ```bash
 npm run ops:tail -- --run-id run-123 --severity critical --limit 50
 npm run ops:tail -- --trace-id <trace-id> --since 2026-03-05T00:00:00.000Z --json
 ```
 
-## Notes
+## Safety Notes
 
-- `paper/live-sim` uses real market + fundamentals + sentiment + news providers.
-- `backtest` uses local fixture data.
-- Execution remains simulated (no real order placement).
-- `STRICT_REAL_MODE=true` is fail-hard: missing key/provider errors stop cycle.
+- Trading pipeline execution is still simulated (no live order placement from AI pipeline).
+- Binance Spot commands are live exchange actions when enabled.
+- Use restricted API keys and symbol whitelist in production.
+
+## Troubleshooting
+
+Troubleshooting is managed via GitHub Issues:
+
+- Report bugs: [Open a Bug Report](https://github.com/mgalihpp/vexis-trading-agents/issues/new?template=bug_report.md)
+- Ask questions / ops incidents: [Issues](https://github.com/mgalihpp/vexis-trading-agents/issues)
+
+Please include:
+
+- command used
+- mode/symbol/timeframe
+- expected vs actual result
+- relevant logs (`--json` output if possible)
+- sanitized environment details
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, coding standards, and PR checklist.
