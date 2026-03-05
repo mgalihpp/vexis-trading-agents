@@ -12,5 +12,6 @@ export * from "./runner";
 export * from "./safety";
 export * from "./schemas";
 export * from "./secrets";
+export * from "./spot-trading";
 export * from "./sqlite";
 export * from "./telemetry";

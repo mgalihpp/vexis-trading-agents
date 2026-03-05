@@ -19,6 +19,7 @@ import { BinanceAccountProvider } from "../core/account-state";
 import { InMemoryEventStore, SqliteEventStorePersistence } from "../core/event-store";
 import { HealthMonitor } from "../core/health";
 import { computeBackoffDelay } from "../core/ops";
+import { BinanceSpotTradingService } from "../core/spot-trading";
 import { InMemoryTelemetrySink, SqliteTelemetrySink } from "../core/telemetry";
 import type { DecisionRunner } from "../core/llm-runner";
 import { BacktestDataProvider, RealCryptoDataProvider } from "../core/market-data";
@@ -37,7 +38,7 @@ import {
 import { SimulatedExchange } from "../sim/simulated-exchange";
 import { formatChatStyleRunReport, printRunReport } from "../utils/report";
 import type { MarketDataQuery, OHLCVCandle, ProviderFetchResult } from "../types";
-import { ProviderError } from "../types";
+import { ProviderError, SpotGuardError } from "../types";
 
 const makeClock = () => {
   let i = 0;
@@ -448,7 +449,7 @@ export const runDeterministicChecks = async (): Promise<void> => {
     maxConsecutiveFailures: 2
   });
 
-  const mockSpotClient = {
+  const mockAccountSpotClient = {
     fetchBalance: async () => ({
       free: { USDT: 800, BTC: 0.01 },
       total: { USDT: 1000, BTC: 0.02 }
@@ -482,7 +483,7 @@ export const runDeterministicChecks = async (): Promise<void> => {
     defaultDrawdownPct: 3,
     telemetrySink: accountTelemetry,
     healthMonitor: accountHealth,
-    spotClient: mockSpotClient,
+    spotClient: mockAccountSpotClient,
     usdmClient: mockFuturesClient,
     coinmClient: mockCoinmClient
   });
@@ -538,6 +539,161 @@ export const runDeterministicChecks = async (): Promise<void> => {
       }),
     (error: unknown) => error instanceof ProviderError,
     "Fail-hard account provider should throw on balance fetch error"
+  );
+
+  const spotTelemetry = new InMemoryTelemetrySink(false);
+  const mockSpotClient = {
+    loadMarkets: async () => ({
+      "BTC/USDT": {
+        symbol: "BTC/USDT",
+        spot: true,
+        limits: {
+          amount: { min: 0.0001, max: 100 },
+          cost: { min: 5 }
+        }
+      }
+    }),
+    createOrder: async (
+      symbol: string,
+      type: string,
+      side: string,
+      amount?: number,
+      price?: number
+    ) => ({
+      id: "order-1",
+      symbol,
+      status: "open",
+      side,
+      type,
+      amount,
+      price,
+      filled: 0,
+      remaining: amount,
+      cost: amount && price ? amount * price : 0,
+      timestamp: 1700000000000
+    }),
+    fetchOrder: async (id: string, symbol: string) => ({
+      id,
+      symbol,
+      status: "closed",
+      side: "buy",
+      type: "limit",
+      amount: 0.01,
+      price: 70000,
+      filled: 0.01,
+      remaining: 0,
+      cost: 700,
+      timestamp: 1700000000000
+    }),
+    fetchOpenOrders: async () => [],
+    fetchClosedOrders: async () => [],
+    cancelOrder: async (id: string, symbol: string) => ({
+      id,
+      symbol,
+      status: "canceled",
+      side: "buy",
+      type: "limit",
+      amount: 0.01,
+      price: 70000,
+      timestamp: 1700000000000
+    }),
+    cancelAllOrders: async () => [],
+    fetchBalance: async () => ({
+      free: { USDT: 1000, BTC: 0.01 },
+      used: { USDT: 0, BTC: 0 },
+      total: { USDT: 1000, BTC: 0.01 }
+    }),
+    fetchMyTrades: async () => [
+      {
+        id: "trade-1",
+        order: "order-1",
+        symbol: "BTC/USDT",
+        side: "buy",
+        price: 70000,
+        amount: 0.01,
+        cost: 700,
+        fee: { cost: 0.7, currency: "USDT" },
+        timestamp: 1700000000000
+      }
+    ],
+    fetchTicker: async () => ({ bid: 70000, ask: 70100, last: 70050 }),
+    fetchTickers: async () => ({
+      "BTC/USDT": { bid: 70000, ask: 70100, last: 70050 }
+    }),
+    fetchOrderBook: async () => ({
+      bids: [[70000, 1]] as Array<[number, number]>,
+      asks: [[70100, 1]] as Array<[number, number]>
+    }),
+    amountToPrecision: (_symbol: string, amount: number) => String(amount),
+    priceToPrecision: (_symbol: string, price: number) => String(price)
+  };
+
+  const spotService = BinanceSpotTradingService.getInstance({
+    enabled: true,
+    apiKey: "k",
+    apiSecret: "s",
+    symbolWhitelist: ["BTC/USDT"],
+    defaultTif: "GTC",
+    recvWindow: 10000,
+    timeoutMs: 5000,
+    telemetrySink: spotTelemetry,
+    mode: "paper",
+    client: mockSpotClient
+  });
+
+  await assert.rejects(
+    () =>
+      spotService.placeOrder(
+        {
+          symbol: "ETH/USDT",
+          side: "buy",
+          type: "market",
+          amount: 0.01
+        },
+        { runId: "spot-1", traceId: "spot-1", mode: "paper" }
+      ),
+    (error: unknown) => error instanceof SpotGuardError,
+    "Spot guard should reject symbols outside whitelist"
+  );
+
+  await assert.rejects(
+    () =>
+      spotService.placeOrder(
+        {
+          symbol: "BTC/USDT",
+          side: "buy",
+          type: "limit",
+          amount: 0.00001,
+          price: 70000
+        },
+        { runId: "spot-2", traceId: "spot-2", mode: "paper" }
+      ),
+    (error: unknown) => error instanceof SpotGuardError,
+    "Spot guard should reject amount below minimum"
+  );
+
+  const placed = await spotService.placeOrder(
+    {
+      symbol: "BTC/USDT",
+      side: "buy",
+      type: "limit",
+      amount: 0.01,
+      price: 70000
+    },
+    { runId: "spot-3", traceId: "spot-3", mode: "paper" }
+  );
+  assert.equal(placed.orderId, "order-1", "Spot placeOrder should map order id");
+
+  const quote = await spotService.fetchQuote("BTC/USDT", { runId: "spot-4", traceId: "spot-4", mode: "paper" }, 1);
+  assert.ok(quote.bid > 0 && quote.ask > 0, "Spot quote should include bid/ask");
+  const trades = await spotService.fetchMyTrades("BTC/USDT", { runId: "spot-5", traceId: "spot-5", mode: "paper" }, 10);
+  assert.equal(trades.length, 1, "Spot trades should map trade records");
+  const balance = await spotService.fetchBalanceSnapshot({ runId: "spot-6", traceId: "spot-6", mode: "paper" });
+  assert.ok(balance.total_assets > 0, "Spot balance snapshot should include assets");
+  assert.equal(
+    spotTelemetry.getMetrics().some((m) => m.name === "spot_action_success"),
+    true,
+    "Spot actions should emit success/failure metrics"
   );
 
   const delayAttempt1 = computeBackoffDelay({ maxAttempts: 3, initialDelayMs: 100, backoffFactor: 2, maxDelayMs: 1000, jitterMs: 0 }, 1);

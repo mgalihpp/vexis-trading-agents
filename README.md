@@ -31,6 +31,16 @@ vexis runner [--asset SYMBOL --timeframe TF --limit N --interval SEC --candle-al
 vexis ops tail [--run-id ... --trace-id ... --since ISO --severity info|warning|critical --limit N --json]
 vexis health [--check healthz|readyz --port N --json]
 vexis account check [--mode ... --json]
+vexis spot buy --symbol BTC/USDT --type market --amount 0.001 [--json]
+vexis spot sell --symbol BTC/USDT --type limit --amount 0.001 --price 90000 [--json]
+vexis spot order get --symbol BTC/USDT --order-id <id>
+vexis spot order cancel --symbol BTC/USDT --order-id <id>
+vexis spot order cancel-all [--symbol BTC/USDT]
+vexis spot orders open [--symbol BTC/USDT --limit 50]
+vexis spot orders closed [--symbol BTC/USDT --limit 50]
+vexis spot balance
+vexis spot trades --symbol BTC/USDT [--limit 50]
+vexis spot quote --symbol BTC/USDT [--depth 5]
 vexis doctor [--json]
 vexis env check [--json]
 vexis validate
@@ -93,6 +103,11 @@ BINANCE_ACCOUNT_ENABLED=true
 BINANCE_ACCOUNT_SCOPE=spot+usdm+coinm
 BINANCE_DEFAULT_EXPOSURE_PCT=8
 BINANCE_DEFAULT_DRAWDOWN_PCT=3
+
+BINANCE_SPOT_ENABLED=true
+BINANCE_SPOT_SYMBOL_WHITELIST=BTC/USDT,ETH/USDT,SOL/USDT
+BINANCE_SPOT_DEFAULT_TIF=GTC
+BINANCE_SPOT_RECV_WINDOW=10000
 ```
 
 - `OBS_PERSIST_ENABLED=true` stores telemetry + decision logs in SQLite.
@@ -101,6 +116,8 @@ BINANCE_DEFAULT_DRAWDOWN_PCT=3
 - Retention cleanup purges records older than `OBS_RETENTION_DAYS` when `OBS_CLEANUP_ENABLED=true`.
 - `BINANCE_ACCOUNT_ENABLED=true` enables auto portfolio read from Binance spot + USD-M + COIN-M futures.
 - Binance account fetch is fail-hard by default: cycle stops on auth/provider failure.
+- Spot actions are live by default when `BINANCE_SPOT_ENABLED=true`.
+- Spot order execution is restricted to `BINANCE_SPOT_SYMBOL_WHITELIST`.
 - Health endpoints:
   - `GET /healthz` liveness
   - `GET /readyz` provider/LLM health + runner state snapshot

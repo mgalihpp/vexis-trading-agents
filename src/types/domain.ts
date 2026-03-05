@@ -438,3 +438,91 @@ export interface EffectiveConfigView {
   effective: Record<string, JSONValue>;
   source: Record<string, "flag" | "env" | "default">;
 }
+
+export type SpotOrderType = "market" | "limit";
+export type SpotOrderSide = "buy" | "sell";
+export type SpotTimeInForce = "GTC" | "IOC" | "FOK";
+
+export interface SpotOrderRequest {
+  symbol: string;
+  side: SpotOrderSide;
+  type: SpotOrderType;
+  amount?: number;
+  quoteCost?: number;
+  price?: number;
+  tif?: SpotTimeInForce;
+  clientOrderId?: string;
+}
+
+export interface SpotOrderResult {
+  exchange: "binance";
+  symbol: string;
+  orderId: string;
+  clientOrderId?: string;
+  status: string;
+  side: SpotOrderSide;
+  type: SpotOrderType;
+  timeInForce?: SpotTimeInForce;
+  amount: number | null;
+  price: number | null;
+  average: number | null;
+  filled: number | null;
+  remaining: number | null;
+  cost: number | null;
+  timestamp: string;
+}
+
+export interface SpotBalanceAsset {
+  asset: string;
+  free: number;
+  used: number;
+  total: number;
+  usdt_estimate: number;
+}
+
+export interface SpotBalanceSnapshot {
+  exchange: "binance";
+  timestamp: string;
+  total_assets: number;
+  total_usdt_estimate: number;
+  assets: SpotBalanceAsset[];
+  top_exposure: SpotBalanceAsset[];
+}
+
+export interface SpotTradeRecord {
+  id: string;
+  orderId?: string;
+  symbol: string;
+  side: SpotOrderSide;
+  price: number;
+  amount: number;
+  cost: number;
+  feeCost?: number;
+  feeCurrency?: string;
+  timestamp: string;
+}
+
+export interface SpotQuoteSnapshot {
+  symbol: string;
+  timestamp: string;
+  bid: number;
+  ask: number;
+  last: number;
+  spread_bps: number;
+  orderbook_top: {
+    bids: Array<[number, number]>;
+    asks: Array<[number, number]>;
+  };
+}
+
+export class SpotGuardError extends Error {
+  public readonly code: string;
+  public readonly detail?: JSONValue;
+
+  public constructor(code: string, message: string, detail?: JSONValue) {
+    super(message);
+    this.name = "SpotGuardError";
+    this.code = code;
+    this.detail = detail;
+  }
+}

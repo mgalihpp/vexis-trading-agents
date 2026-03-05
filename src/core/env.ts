@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { config as loadDotEnv } from "dotenv";
 import { EnvSecretProvider } from "./secrets";
+import type { SpotTimeInForce } from "../types";
 
 loadDotEnv();
 
@@ -48,6 +49,10 @@ export interface RuntimeConfig {
   binanceAccountScope: "spot+usdm+coinm";
   binanceDefaultExposurePct: number;
   binanceDefaultDrawdownPct: number;
+  binanceSpotEnabled: boolean;
+  binanceSpotSymbolWhitelist: string[];
+  binanceSpotDefaultTif: SpotTimeInForce;
+  binanceSpotRecvWindow: number;
 }
 
 const asInt = (value: string | undefined, fallback: number): number => {
@@ -65,6 +70,15 @@ const asBool = (value: string | undefined, fallback: boolean): boolean => {
   const normalized = value.trim().toLowerCase();
   if (["1", "true", "yes", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+};
+
+const asSpotTif = (value: string | undefined, fallback: SpotTimeInForce): SpotTimeInForce => {
+  if (!value) return fallback;
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "GTC" || normalized === "IOC" || normalized === "FOK") {
+    return normalized;
+  }
   return fallback;
 };
 
@@ -134,7 +148,14 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
         ? "spot+usdm+coinm"
         : "spot+usdm+coinm",
     binanceDefaultExposurePct: asFloat(process.env.BINANCE_DEFAULT_EXPOSURE_PCT, 8),
-    binanceDefaultDrawdownPct: asFloat(process.env.BINANCE_DEFAULT_DRAWDOWN_PCT, 3)
+    binanceDefaultDrawdownPct: asFloat(process.env.BINANCE_DEFAULT_DRAWDOWN_PCT, 3),
+    binanceSpotEnabled: asBool(process.env.BINANCE_SPOT_ENABLED, false),
+    binanceSpotSymbolWhitelist: (process.env.BINANCE_SPOT_SYMBOL_WHITELIST ?? "BTC/USDT,ETH/USDT,SOL/USDT")
+      .split(",")
+      .map((v) => v.trim().toUpperCase())
+      .filter(Boolean),
+    binanceSpotDefaultTif: asSpotTif(process.env.BINANCE_SPOT_DEFAULT_TIF, "GTC"),
+    binanceSpotRecvWindow: asInt(process.env.BINANCE_SPOT_RECV_WINDOW, 10000)
   };
 
   cfg.openRouterBaseUrl = asHttpUrl(cfg.openRouterBaseUrl, "OPENROUTER_BASE_URL");
@@ -165,6 +186,7 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
   failIf(cfg.binanceAccountScope !== "spot+usdm+coinm", "BINANCE_ACCOUNT_SCOPE currently supports only 'spot+usdm+coinm'");
   failIf(cfg.binanceDefaultExposurePct < 0 || cfg.binanceDefaultExposurePct > 100, "BINANCE_DEFAULT_EXPOSURE_PCT must be within 0..100");
   failIf(cfg.binanceDefaultDrawdownPct < 0 || cfg.binanceDefaultDrawdownPct > 100, "BINANCE_DEFAULT_DRAWDOWN_PCT must be within 0..100");
+  failIf(cfg.binanceSpotRecvWindow < 1000, "BINANCE_SPOT_RECV_WINDOW must be >= 1000");
 
   if (cfg.obsPersistEnabled) {
     const resolvedDbPath = path.resolve(cfg.obsSqlitePath);
@@ -182,6 +204,12 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
   if (cfg.binanceAccountEnabled) {
     failIf(!cfg.binanceApiKey, "BINANCE_API_KEY is required when BINANCE_ACCOUNT_ENABLED=true");
     failIf(!cfg.binanceApiSecret, "BINANCE_API_SECRET is required when BINANCE_ACCOUNT_ENABLED=true");
+  }
+
+  if (cfg.binanceSpotEnabled) {
+    failIf(!cfg.binanceApiKey, "BINANCE_API_KEY is required when BINANCE_SPOT_ENABLED=true");
+    failIf(!cfg.binanceApiSecret, "BINANCE_API_SECRET is required when BINANCE_SPOT_ENABLED=true");
+    failIf(cfg.binanceSpotSymbolWhitelist.length === 0, "BINANCE_SPOT_SYMBOL_WHITELIST must include at least one symbol when BINANCE_SPOT_ENABLED=true");
   }
 
   return cfg;

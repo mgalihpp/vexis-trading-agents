@@ -2,6 +2,8 @@ import { confirm, input, select } from "@inquirer/prompts";
 import { Command } from "commander";
 import { randomUUID } from "node:crypto";
 import { BinanceAccountProvider, StaticPortfolioStateProvider } from "./core/account-state";
+import { BinanceSpotTradingService } from "./core/spot-trading";
+import { InMemoryTelemetrySink, SqliteTelemetrySink } from "./core/telemetry";
 import { loadRuntimeConfig, type RuntimeConfig } from "./core/env";
 import { runApp, type AppRunOverrides } from "./main";
 import { runOpsTail } from "./scripts/ops-tail";
@@ -12,7 +14,9 @@ import type {
   EffectiveConfigView,
   JSONValue,
   OutputFormat,
-  PipelineMode
+  PipelineMode,
+  SpotOrderRequest,
+  SpotTimeInForce
 } from "./types";
 
 interface CommonRunOptions {
@@ -40,6 +44,40 @@ interface TailOptions {
   severity?: "info" | "warning" | "critical";
   limit?: number;
   json?: boolean;
+}
+
+interface SpotPlaceOptions {
+  symbol: string;
+  type?: "market" | "limit";
+  amount?: number;
+  price?: number;
+  quoteCost?: number;
+  tif?: SpotTimeInForce;
+}
+
+interface SpotOrderGetOptions {
+  symbol: string;
+  orderId: string;
+}
+
+interface SpotOrdersListOptions {
+  symbol?: string;
+  limit?: number;
+}
+
+interface SpotOrderCancelOptions {
+  symbol: string;
+  orderId: string;
+}
+
+interface SpotTradesOptions {
+  symbol: string;
+  limit?: number;
+}
+
+interface SpotQuoteOptions {
+  symbol: string;
+  depth?: number;
 }
 
 const SPINNER_FRAMES = ["|", "/", "-", "\\"];
@@ -121,6 +159,31 @@ interface ResolvedRuntime {
   view: EffectiveConfigView;
 }
 
+const makeSpotContext = (mode: PipelineMode): { runId: string; traceId: string; mode: PipelineMode } => ({
+  runId: `spot-op-${Date.now()}`,
+  traceId: randomUUID(),
+  mode
+});
+
+const getSpotService = (runtime: RuntimeConfig, mode: PipelineMode): BinanceSpotTradingService => {
+  const telemetrySink = runtime.obsPersistEnabled
+    ? new SqliteTelemetrySink(runtime.obsSqlitePath)
+    : new InMemoryTelemetrySink(false);
+  return BinanceSpotTradingService.getInstance({
+    enabled: runtime.binanceSpotEnabled,
+    apiKey: runtime.binanceApiKey,
+    apiSecret: runtime.binanceApiSecret,
+    symbolWhitelist: runtime.binanceSpotSymbolWhitelist,
+    defaultTif: runtime.binanceSpotDefaultTif,
+    recvWindow: runtime.binanceSpotRecvWindow,
+    timeoutMs: runtime.nodeTimeoutMs,
+    mode,
+    telemetrySink
+  });
+};
+
+const asJsonValue = (value: unknown): JSONValue => value as JSONValue;
+
 const resolveRuntimeConfig = (
   global: CliGlobalOptions,
   overrides: Partial<AppRunOverrides>
@@ -141,6 +204,10 @@ const resolveRuntimeConfig = (
     strict_real_mode: runtime.strictRealMode,
     obs_persist_enabled: runtime.obsPersistEnabled,
     obs_sqlite_path: runtime.obsSqlitePath,
+    binance_spot_enabled: runtime.binanceSpotEnabled,
+    binance_spot_symbol_whitelist: runtime.binanceSpotSymbolWhitelist,
+    binance_spot_default_tif: runtime.binanceSpotDefaultTif,
+    binance_spot_recv_window: runtime.binanceSpotRecvWindow,
     openrouter_model: runtime.openRouterModel,
     binance_api_key: maskSecret(runtime.binanceApiKey),
     binance_api_secret: maskSecret(runtime.binanceApiSecret),
@@ -185,6 +252,10 @@ const resolveRuntimeConfig = (
     strict_real_mode: process.env.STRICT_REAL_MODE ? "env" : "default",
     obs_persist_enabled: process.env.OBS_PERSIST_ENABLED ? "env" : "default",
     obs_sqlite_path: process.env.OBS_SQLITE_PATH ? "env" : "default",
+    binance_spot_enabled: process.env.BINANCE_SPOT_ENABLED ? "env" : "default",
+    binance_spot_symbol_whitelist: process.env.BINANCE_SPOT_SYMBOL_WHITELIST ? "env" : "default",
+    binance_spot_default_tif: process.env.BINANCE_SPOT_DEFAULT_TIF ? "env" : "default",
+    binance_spot_recv_window: process.env.BINANCE_SPOT_RECV_WINDOW ? "env" : "default",
     openrouter_model: process.env.OPENROUTER_MODEL ? "env" : "default",
     binance_api_key: process.env.BINANCE_API_KEY ? "env" : "default",
     binance_api_secret: process.env.BINANCE_API_SECRET ? "env" : "default",
@@ -230,6 +301,14 @@ const doDoctor = (runtime: RuntimeConfig, mode: PipelineMode): CliCommandResult 
       errors.push("BINANCE_API_KEY/BINANCE_API_SECRET required when BINANCE_ACCOUNT_ENABLED=true.");
     }
   }
+  if (runtime.binanceSpotEnabled) {
+    if (!runtime.binanceApiKey || !runtime.binanceApiSecret) {
+      errors.push("BINANCE_API_KEY/BINANCE_API_SECRET required when BINANCE_SPOT_ENABLED=true.");
+    }
+    if (runtime.binanceSpotSymbolWhitelist.length === 0) {
+      errors.push("BINANCE_SPOT_SYMBOL_WHITELIST must contain at least one symbol.");
+    }
+  }
   if (runtime.obsPersistEnabled && !runtime.obsSqlitePath) {
     errors.push("OBS_SQLITE_PATH is required when OBS_PERSIST_ENABLED=true.");
   }
@@ -247,6 +326,7 @@ const doDoctor = (runtime: RuntimeConfig, mode: PipelineMode): CliCommandResult 
       checks: {
         strict_real_mode: runtime.strictRealMode,
         binance_account_enabled: runtime.binanceAccountEnabled,
+        binance_spot_enabled: runtime.binanceSpotEnabled,
         obs_persist_enabled: runtime.obsPersistEnabled,
         health_server_enabled: runtime.healthServerEnabled
       }
@@ -305,6 +385,146 @@ const doAccountCheck = async (
   };
 };
 
+const parseSpotType = (value?: string): "market" | "limit" => {
+  return value?.toLowerCase() === "limit" ? "limit" : "market";
+};
+
+const buildSpotOrderRequest = (
+  side: "buy" | "sell",
+  options: SpotPlaceOptions,
+  defaultTif: SpotTimeInForce
+): SpotOrderRequest => ({
+  symbol: options.symbol.trim().toUpperCase(),
+  side,
+  type: parseSpotType(options.type),
+  amount: options.amount,
+  price: options.price,
+  quoteCost: options.quoteCost,
+  tif: options.tif ?? defaultTif
+});
+
+const doSpotBuy = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: SpotPlaceOptions
+): Promise<CliCommandResult> => {
+  const service = getSpotService(runtime, mode);
+  const order = await service.placeOrder(
+    buildSpotOrderRequest("buy", options, runtime.binanceSpotDefaultTif),
+    makeSpotContext(mode)
+  );
+  return { exitCode: 0, message: "spot buy success", data: asJsonValue(order) };
+};
+
+const doSpotSell = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: SpotPlaceOptions
+): Promise<CliCommandResult> => {
+  const service = getSpotService(runtime, mode);
+  const order = await service.placeOrder(
+    buildSpotOrderRequest("sell", options, runtime.binanceSpotDefaultTif),
+    makeSpotContext(mode)
+  );
+  return { exitCode: 0, message: "spot sell success", data: asJsonValue(order) };
+};
+
+const doSpotOrderGet = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: SpotOrderGetOptions
+): Promise<CliCommandResult> => {
+  const service = getSpotService(runtime, mode);
+  const order = await service.fetchOrder(options.orderId, options.symbol.trim().toUpperCase(), makeSpotContext(mode));
+  return { exitCode: 0, message: "spot order fetched", data: asJsonValue(order) };
+};
+
+const doSpotOrdersOpen = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: SpotOrdersListOptions
+): Promise<CliCommandResult> => {
+  const service = getSpotService(runtime, mode);
+  const orders = await service.fetchOpenOrders(
+    makeSpotContext(mode),
+    options.symbol?.trim().toUpperCase(),
+    options.limit
+  );
+  return { exitCode: 0, message: "spot open orders fetched", data: asJsonValue(orders) };
+};
+
+const doSpotOrdersClosed = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: SpotOrdersListOptions
+): Promise<CliCommandResult> => {
+  const service = getSpotService(runtime, mode);
+  const orders = await service.fetchClosedOrders(
+    makeSpotContext(mode),
+    options.symbol?.trim().toUpperCase(),
+    options.limit
+  );
+  return { exitCode: 0, message: "spot closed orders fetched", data: asJsonValue(orders) };
+};
+
+const doSpotOrderCancel = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: SpotOrderCancelOptions
+): Promise<CliCommandResult> => {
+  const service = getSpotService(runtime, mode);
+  const order = await service.cancelOrder(
+    options.orderId,
+    options.symbol.trim().toUpperCase(),
+    makeSpotContext(mode)
+  );
+  return { exitCode: 0, message: "spot order canceled", data: asJsonValue(order) };
+};
+
+const doSpotOrderCancelAll = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  symbol?: string
+): Promise<CliCommandResult> => {
+  const service = getSpotService(runtime, mode);
+  const orders = await service.cancelAllOrders(makeSpotContext(mode), symbol?.trim().toUpperCase());
+  return { exitCode: 0, message: "spot cancel-all completed", data: asJsonValue(orders) };
+};
+
+const doSpotBalance = async (runtime: RuntimeConfig, mode: PipelineMode): Promise<CliCommandResult> => {
+  const service = getSpotService(runtime, mode);
+  const snapshot = await service.fetchBalanceSnapshot(makeSpotContext(mode));
+  return { exitCode: 0, message: "spot balance fetched", data: asJsonValue(snapshot) };
+};
+
+const doSpotTrades = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: SpotTradesOptions
+): Promise<CliCommandResult> => {
+  const service = getSpotService(runtime, mode);
+  const trades = await service.fetchMyTrades(
+    options.symbol.trim().toUpperCase(),
+    makeSpotContext(mode),
+    options.limit
+  );
+  return { exitCode: 0, message: "spot trades fetched", data: asJsonValue(trades) };
+};
+
+const doSpotQuote = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: SpotQuoteOptions
+): Promise<CliCommandResult> => {
+  const service = getSpotService(runtime, mode);
+  const quote = await service.fetchQuote(
+    options.symbol.trim().toUpperCase(),
+    makeSpotContext(mode),
+    options.depth
+  );
+  return { exitCode: 0, message: "spot quote fetched", data: asJsonValue(quote) };
+};
+
 const printResult = (result: CliCommandResult, asJson: boolean): void => {
   if (asJson) {
     console.log(JSON.stringify(result, null, 2));
@@ -343,22 +563,178 @@ const tailOptionsToArgv = (options: TailOptions): string[] => {
   return argv;
 };
 
+const promptInt = async (message: string, fallback: number): Promise<number> => {
+  while (true) {
+    const raw = await input({ message, default: String(fallback) });
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    console.log("Input must be a positive integer.");
+  }
+};
+
+const promptFloat = async (message: string, fallback?: number): Promise<number | undefined> => {
+  while (true) {
+    const raw = await input({ message, default: fallback !== undefined ? String(fallback) : "" });
+    if (raw.trim() === "") return undefined;
+    const parsed = Number.parseFloat(raw);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    console.log("Input must be a positive number or empty.");
+  }
+};
+
+const promptSymbol = async (fallback = "SOL/USDT"): Promise<string> => {
+  while (true) {
+    const symbol = (await input({ message: "Symbol", default: fallback })).trim().toUpperCase();
+    if (symbol.includes("/")) return symbol;
+    console.log("Symbol format must be BASE/QUOTE (example: SOL/USDT).");
+  }
+};
+
+const runSpotInteractive = async (
+  global: CliGlobalOptions,
+  runtime: RuntimeConfig,
+  mode: PipelineMode
+): Promise<void> => {
+  let back = false;
+  while (!back) {
+    const choice = await select({
+      message: "Spot Desk",
+      choices: [
+        { name: "Buy", value: "buy" },
+        { name: "Sell", value: "sell" },
+        { name: "Order Get", value: "order-get" },
+        { name: "Order Cancel", value: "order-cancel" },
+        { name: "Order Cancel All", value: "order-cancel-all" },
+        { name: "Orders Open", value: "orders-open" },
+        { name: "Orders Closed", value: "orders-closed" },
+        { name: "Balance", value: "balance" },
+        { name: "Trades", value: "trades" },
+        { name: "Quote", value: "quote" },
+        { name: "Back", value: "back" }
+      ]
+    });
+
+    if (choice === "back") {
+      back = true;
+      continue;
+    }
+
+    try {
+      if (choice === "buy" || choice === "sell") {
+        const symbol = await promptSymbol("BTC/USDT");
+        const type = (await select({
+          message: "Order type",
+          choices: [
+            { name: "Market", value: "market" },
+            { name: "Limit", value: "limit" }
+          ]
+        })) as "market" | "limit";
+        const amount = await promptFloat("Amount (base)", 0.001);
+        let price: number | undefined;
+        let quoteCost: number | undefined;
+        if (type === "limit") {
+          price = await promptFloat("Limit price", 100000);
+        } else if (choice === "buy") {
+          quoteCost = await promptFloat("Quote cost (optional, USDT)", 50);
+        }
+
+        const options: SpotPlaceOptions = { symbol, type, amount, price, quoteCost };
+        const result = await withLoading(
+          choice === "buy" ? "Placing spot buy" : "Placing spot sell",
+          async () => choice === "buy" ? doSpotBuy(runtime, mode, options) : doSpotSell(runtime, mode, options)
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "order-get") {
+        const symbol = await promptSymbol("BTC/USDT");
+        const orderId = await input({ message: "Order ID" });
+        const result = await withLoading("Fetching spot order", async () =>
+          doSpotOrderGet(runtime, mode, { symbol, orderId: orderId.trim() })
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "order-cancel") {
+        const symbol = await promptSymbol("BTC/USDT");
+        const orderId = await input({ message: "Order ID" });
+        const result = await withLoading("Canceling spot order", async () =>
+          doSpotOrderCancel(runtime, mode, { symbol, orderId: orderId.trim() })
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "order-cancel-all") {
+        const useSymbol = await confirm({ message: "Filter by symbol?", default: false });
+        const symbol = useSymbol ? await promptSymbol("BTC/USDT") : undefined;
+        const result = await withLoading("Canceling all spot orders", async () =>
+          doSpotOrderCancelAll(runtime, mode, symbol)
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "orders-open" || choice === "orders-closed") {
+        const useSymbol = await confirm({ message: "Filter by symbol?", default: true });
+        const symbol = useSymbol ? await promptSymbol("BTC/USDT") : undefined;
+        const limit = await promptInt("Limit", 50);
+        const result = await withLoading(
+          choice === "orders-open" ? "Fetching open spot orders" : "Fetching closed spot orders",
+          async () =>
+            choice === "orders-open"
+              ? doSpotOrdersOpen(runtime, mode, { symbol, limit })
+              : doSpotOrdersClosed(runtime, mode, { symbol, limit })
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "balance") {
+        const result = await withLoading("Fetching spot balance", async () => doSpotBalance(runtime, mode));
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "trades") {
+        const symbol = await promptSymbol("BTC/USDT");
+        const limit = await promptInt("Limit", 50);
+        const result = await withLoading("Fetching spot trades", async () =>
+          doSpotTrades(runtime, mode, { symbol, limit })
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "quote") {
+        const symbol = await promptSymbol("BTC/USDT");
+        const depth = await promptInt("Orderbook depth", 5);
+        const result = await withLoading("Fetching spot quote", async () =>
+          doSpotQuote(runtime, mode, { symbol, depth })
+        );
+        printResult(result, Boolean(global.json));
+      }
+    } catch (error) {
+      printResult({ exitCode: 1, message: `spot interactive failed: ${String(error)}` }, Boolean(global.json));
+    }
+  }
+};
+
 const runInteractive = async (command: Command): Promise<void> => {
   const global = normalizeGlobalOptions(command);
+  console.log("Vexis Interactive Console");
 
   let exitRequested = false;
   while (!exitRequested) {
     const choice = await select({
-      message: "Select action",
+      message: "Main menu",
       choices: [
-        { name: "Run one cycle", value: "run" },
-        { name: "Start runner", value: "runner" },
-        { name: "Ops tail", value: "ops-tail" },
-        { name: "Health check", value: "health" },
-        { name: "Account check", value: "account-check" },
-        { name: "Doctor", value: "doctor" },
-        { name: "Env check", value: "env-check" },
-        { name: "Validate", value: "validate" },
+        { name: "Trading Cycle", value: "trading" },
+        { name: "Spot Desk", value: "spot" },
+        { name: "Ops & Health", value: "ops" },
+        { name: "Admin", value: "admin" },
         { name: "Exit", value: "exit" }
       ]
     });
@@ -368,110 +744,153 @@ const runInteractive = async (command: Command): Promise<void> => {
       continue;
     }
 
-    if (choice === "run") {
-      const asset = await input({ message: "Asset", default: "SOL/USDT" });
-      const timeframe = await input({ message: "Timeframe", default: "1h" });
-      const limitRaw = await input({ message: "Candle limit", default: "50" });
-      const showTelemetry = await confirm({ message: "Show telemetry?", default: false });
-      await withLoading("Running cycle", async () =>
-        runApp(
-          toRunOverrides(global, {
-            asset,
-            timeframe,
-            limit: Number.parseInt(limitRaw, 10),
-            showTelemetry,
-          }),
-        ),
-      );
-      continue;
-    }
-
-    if (choice === "runner") {
-      const asset = await input({ message: "Asset", default: "SOL/USDT" });
-      const timeframe = await input({ message: "Timeframe", default: "1h" });
-      const limitRaw = await input({ message: "Candle limit", default: "50" });
-      const intervalRaw = await input({ message: "Interval seconds", default: "60" });
-      const candleAlign = await confirm({ message: "Candle align?", default: true });
-      const maxBackoffRaw = await input({ message: "Max backoff seconds", default: "900" });
-      await withLoading("Starting runner", async () =>
-        runApp(
-          toRunOverrides(
-            global,
-            {
-              asset,
-              timeframe,
-              limit: Number.parseInt(limitRaw, 10),
-            },
-            {
-              runnerEnabled: true,
-              runnerIntervalSeconds: Number.parseInt(intervalRaw, 10),
-              runnerCandleAlign: candleAlign,
-              runnerMaxBackoffSeconds: Number.parseInt(maxBackoffRaw, 10),
-            },
-          ),
-        ),
-      );
-      continue;
-    }
-
-    if (choice === "ops-tail") {
-      const runId = await input({ message: "Run ID (optional)", default: "" });
-      const severity = await select({
-        message: "Severity filter",
+    if (choice === "trading") {
+      const action = await select({
+        message: "Trading actions",
         choices: [
-          { name: "None", value: "" },
-          { name: "info", value: "info" },
-          { name: "warning", value: "warning" },
-          { name: "critical", value: "critical" }
+          { name: "Run one cycle", value: "run" },
+          { name: "Start runner", value: "runner" },
+          { name: "Back", value: "back" }
         ]
       });
-      const asJson = await confirm({ message: "Output JSON?", default: false });
-      await withLoading("Fetching ops tail", async () =>
-        runOpsTail(
-          tailOptionsToArgv({
-            runId: runId || undefined,
-            severity: (severity || undefined) as TailOptions["severity"],
-            json: asJson,
+      if (action === "back") continue;
+
+      if (action === "run") {
+        const asset = await promptSymbol("SOL/USDT");
+        const timeframe = await input({ message: "Timeframe", default: "1h" });
+        const limit = await promptInt("Candle limit", 50);
+        const showTelemetry = await confirm({ message: "Show telemetry?", default: false });
+        await withLoading("Running cycle", async () =>
+          runApp(toRunOverrides(global, { asset, timeframe, limit, showTelemetry }))
+        );
+        continue;
+      }
+
+      const asset = await promptSymbol("SOL/USDT");
+      const timeframe = await input({ message: "Timeframe", default: "1h" });
+      const limit = await promptInt("Candle limit", 50);
+      const interval = await promptInt("Interval seconds", 60);
+      const candleAlign = await confirm({ message: "Candle align?", default: true });
+      const maxBackoff = await promptInt("Max backoff seconds", 900);
+      await withLoading("Starting runner", async () =>
+        runApp(
+          toRunOverrides(global, { asset, timeframe, limit }, {
+            runnerEnabled: true,
+            runnerIntervalSeconds: interval,
+            runnerCandleAlign: candleAlign,
+            runnerMaxBackoffSeconds: maxBackoff,
           }),
-        ),
+        )
       );
       continue;
     }
 
-    if (choice === "health") {
-      const check = (await select({
-        message: "Endpoint",
-        choices: [
-          { name: "readyz", value: "readyz" },
-          { name: "healthz", value: "healthz" }
-        ]
-      })) as "healthz" | "readyz";
-      const portRaw = await input({ message: "Port", default: process.env.HEALTH_SERVER_PORT ?? "8787" });
-      const result = await withLoading("Checking health", async () =>
-        doHealthCheck({ check, port: Number.parseInt(portRaw, 10) }),
-      );
-      printResult(result, Boolean(global.json));
-      continue;
-    }
-
-    if (choice === "account-check") {
+    if (choice === "spot") {
       try {
         const { runtime, view } = resolveRuntimeConfig(global, {});
-        const mode = (view.effective.mode as PipelineMode) ?? "backtest";
-        const result = await withLoading("Checking account", async () =>
-          doAccountCheck(runtime, mode),
-        );
-        printResult(result, Boolean(global.json));
+        const mode = (view.effective.mode as PipelineMode) ?? "paper";
+        await runSpotInteractive(global, runtime, mode);
       } catch (error) {
-        printResult(
-          { exitCode: 1, message: `account check failed: ${String(error)}` },
-          Boolean(global.json)
-        );
+        printResult({ exitCode: 1, message: `spot setup failed: ${String(error)}` }, Boolean(global.json));
       }
       continue;
     }
 
-    if (choice === "doctor") {
+    if (choice === "ops") {
+      const opsAction = await select({
+        message: "Ops & Health",
+        choices: [
+          { name: "Ops tail", value: "ops-tail" },
+          { name: "Health check", value: "health" },
+          { name: "Account check", value: "account-check" },
+          { name: "Back", value: "back" }
+        ]
+      });
+      if (opsAction === "back") continue;
+
+      if (opsAction === "ops-tail") {
+        const runId = await input({ message: "Run ID (optional)", default: "" });
+        const severity = await select({
+          message: "Severity filter",
+          choices: [
+            { name: "None", value: "" },
+            { name: "info", value: "info" },
+            { name: "warning", value: "warning" },
+            { name: "critical", value: "critical" }
+          ]
+        });
+        const asJson = await confirm({ message: "Output JSON?", default: false });
+        await withLoading("Fetching ops tail", async () =>
+          runOpsTail(
+            tailOptionsToArgv({
+              runId: runId || undefined,
+              severity: (severity || undefined) as TailOptions["severity"],
+              json: asJson,
+            }),
+          ),
+        );
+        continue;
+      }
+
+      if (opsAction === "health") {
+        const check = (await select({
+          message: "Endpoint",
+          choices: [
+            { name: "readyz", value: "readyz" },
+            { name: "healthz", value: "healthz" }
+          ]
+        })) as "healthz" | "readyz";
+        const port = await promptInt("Port", Number.parseInt(process.env.HEALTH_SERVER_PORT ?? "8787", 10));
+        const result = await withLoading("Checking health", async () => doHealthCheck({ check, port }));
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      try {
+        const { runtime, view } = resolveRuntimeConfig(global, {});
+        const mode = (view.effective.mode as PipelineMode) ?? "backtest";
+        const result = await withLoading("Checking account", async () => doAccountCheck(runtime, mode));
+        printResult(result, Boolean(global.json));
+      } catch (error) {
+        printResult({ exitCode: 1, message: `account check failed: ${String(error)}` }, Boolean(global.json));
+      }
+      continue;
+    }
+
+    if (choice === "admin") {
+      const adminAction = await select({
+        message: "Admin",
+        choices: [
+          { name: "Doctor", value: "doctor" },
+          { name: "Env check", value: "env-check" },
+          { name: "Validate", value: "validate" },
+          { name: "Back", value: "back" }
+        ]
+      });
+      if (adminAction === "back") continue;
+
+      if (adminAction === "validate") {
+        await withLoading("Running validation", async () => runDeterministicChecks());
+        continue;
+      }
+
+      if (adminAction === "env-check") {
+        try {
+          const { view } = resolveRuntimeConfig(global, {});
+          const result = await withLoading("Resolving config", async () =>
+            Promise.resolve({
+              exitCode: 0,
+              message: "effective config",
+              data: view as unknown as JSONValue,
+            } as CliCommandResult),
+          );
+          printResult(result, true);
+        } catch (error) {
+          printResult({ exitCode: 1, message: `env check failed: ${String(error)}` }, true);
+        }
+        continue;
+      }
+
       try {
         const { runtime, view } = resolveRuntimeConfig(global, {});
         const mode = (view.effective.mode as PipelineMode) ?? "backtest";
@@ -482,30 +901,6 @@ const runInteractive = async (command: Command): Promise<void> => {
       } catch (error) {
         printResult({ exitCode: 1, message: `doctor failed: ${String(error)}` }, Boolean(global.json));
       }
-      continue;
-    }
-
-    if (choice === "env-check") {
-      try {
-        const { view } = resolveRuntimeConfig(global, {});
-        const result = await withLoading("Resolving config", async () =>
-          Promise.resolve({
-            exitCode: 0,
-            message: "effective config",
-            data: view as unknown as JSONValue,
-          } as CliCommandResult),
-        );
-        printResult(result, true);
-      } catch (error) {
-        printResult({ exitCode: 1, message: `env check failed: ${String(error)}` }, true);
-      }
-      continue;
-    }
-
-    if (choice === "validate") {
-      await withLoading("Running validation", async () =>
-        runDeterministicChecks(),
-      );
     }
   }
 };
@@ -661,6 +1056,205 @@ accountCommand
         message: `account check failed: ${String(error)}`
       };
       printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+const spotCommand = program.command("spot").description("Binance spot actions");
+spotCommand
+  .command("buy")
+  .description("Place spot buy order")
+  .requiredOption("--symbol <symbol>", "Spot symbol, e.g. BTC/USDT")
+  .option("--type <type>", "market|limit", "market")
+  .option("--amount <amount>", "Base amount", (v) => Number.parseFloat(v))
+  .option("--price <price>", "Limit price", (v) => Number.parseFloat(v))
+  .option("--quote-cost <cost>", "Quote notional for market buy", (v) => Number.parseFloat(v))
+  .option("--tif <tif>", "GTC|IOC|FOK")
+  .action(async (options: SpotPlaceOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Placing spot buy", async () => doSpotBuy(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `spot buy failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+spotCommand
+  .command("sell")
+  .description("Place spot sell order")
+  .requiredOption("--symbol <symbol>", "Spot symbol, e.g. BTC/USDT")
+  .option("--type <type>", "market|limit", "market")
+  .option("--amount <amount>", "Base amount", (v) => Number.parseFloat(v))
+  .option("--price <price>", "Limit price", (v) => Number.parseFloat(v))
+  .option("--tif <tif>", "GTC|IOC|FOK")
+  .action(async (options: SpotPlaceOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Placing spot sell", async () => doSpotSell(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `spot sell failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+const spotOrderCommand = spotCommand.command("order").description("Spot order operations");
+spotOrderCommand
+  .command("get")
+  .description("Get order by id")
+  .requiredOption("--symbol <symbol>", "Spot symbol")
+  .requiredOption("--order-id <orderId>", "Exchange order id")
+  .action(async (options: SpotOrderGetOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Fetching spot order", async () => doSpotOrderGet(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `spot order get failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+spotOrderCommand
+  .command("cancel")
+  .description("Cancel order by id")
+  .requiredOption("--symbol <symbol>", "Spot symbol")
+  .requiredOption("--order-id <orderId>", "Exchange order id")
+  .action(async (options: SpotOrderCancelOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Canceling spot order", async () => doSpotOrderCancel(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `spot order cancel failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+spotOrderCommand
+  .command("cancel-all")
+  .description("Cancel all orders for symbol or all symbols")
+  .option("--symbol <symbol>", "Spot symbol")
+  .action(async (options: { symbol?: string }, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Canceling all spot orders", async () =>
+        doSpotOrderCancelAll(runtime, mode, options.symbol)
+      );
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `spot cancel-all failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+const spotOrdersCommand = spotCommand.command("orders").description("Spot order lists");
+spotOrdersCommand
+  .command("open")
+  .description("Fetch open orders")
+  .option("--symbol <symbol>", "Spot symbol")
+  .option("--limit <limit>", "Limit", (v) => Number.parseInt(v, 10), 50)
+  .action(async (options: SpotOrdersListOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Fetching open spot orders", async () => doSpotOrdersOpen(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `spot open orders failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+spotOrdersCommand
+  .command("closed")
+  .description("Fetch closed orders")
+  .option("--symbol <symbol>", "Spot symbol")
+  .option("--limit <limit>", "Limit", (v) => Number.parseInt(v, 10), 50)
+  .action(async (options: SpotOrdersListOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Fetching closed spot orders", async () => doSpotOrdersClosed(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `spot closed orders failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+spotCommand
+  .command("balance")
+  .description("Fetch spot balance snapshot")
+  .action(async (_: unknown, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Fetching spot balance", async () => doSpotBalance(runtime, mode));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `spot balance failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+spotCommand
+  .command("trades")
+  .description("Fetch my spot trades")
+  .requiredOption("--symbol <symbol>", "Spot symbol")
+  .option("--limit <limit>", "Limit", (v) => Number.parseInt(v, 10), 50)
+  .action(async (options: SpotTradesOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Fetching spot trades", async () => doSpotTrades(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `spot trades failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+spotCommand
+  .command("quote")
+  .description("Fetch spot quote + orderbook top")
+  .requiredOption("--symbol <symbol>", "Spot symbol")
+  .option("--depth <depth>", "Orderbook depth", (v) => Number.parseInt(v, 10), 5)
+  .action(async (options: SpotQuoteOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Fetching spot quote", async () => doSpotQuote(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `spot quote failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
       process.exitCode = 1;
     }
   });

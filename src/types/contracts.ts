@@ -12,6 +12,11 @@ import type {
   OHLCVCandle,
   PortfolioState,
   ProviderFetchResult,
+  SpotBalanceSnapshot,
+  SpotOrderRequest,
+  SpotOrderResult,
+  SpotQuoteSnapshot,
+  SpotTradeRecord,
   SentimentSignal,
   TelemetryEvent
 } from "./domain";
@@ -83,5 +88,49 @@ export interface AccountStateProvider {
     mode: string;
     asset?: string;
   }): void;
+}
+
+export interface SpotTradingProvider {
+  placeOrder(
+    request: SpotOrderRequest,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" }
+  ): Promise<SpotOrderResult>;
+  fetchOrder(
+    orderId: string,
+    symbol: string,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" }
+  ): Promise<SpotOrderResult>;
+  fetchOpenOrders(
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" },
+    symbol?: string,
+    limit?: number
+  ): Promise<SpotOrderResult[]>;
+  fetchClosedOrders(
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" },
+    symbol?: string,
+    limit?: number
+  ): Promise<SpotOrderResult[]>;
+  cancelOrder(
+    orderId: string,
+    symbol: string,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" }
+  ): Promise<SpotOrderResult>;
+  cancelAllOrders(
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" },
+    symbol?: string
+  ): Promise<SpotOrderResult[]>;
+  fetchBalanceSnapshot(
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" }
+  ): Promise<SpotBalanceSnapshot>;
+  fetchMyTrades(
+    symbol: string,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" },
+    limit?: number
+  ): Promise<SpotTradeRecord[]>;
+  fetchQuote(
+    symbol: string,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" },
+    depth?: number
+  ): Promise<SpotQuoteSnapshot>;
 }
 
