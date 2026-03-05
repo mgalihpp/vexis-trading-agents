@@ -1,0 +1,11 @@
+﻿import { defineConfig } from "tsup";
+
+export default defineConfig({
+  entry: ["src/main.ts", "src/scripts/validate.ts"],
+  format: ["esm"],
+  dts: true,
+  sourcemap: true,
+  clean: true,
+  outDir: "dist",
+  target: "es2022"
+});
