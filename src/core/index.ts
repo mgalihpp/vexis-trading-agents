@@ -1,5 +1,6 @@
 export * from "./env";
 export * from "./event-store";
+export * from "./account-state";
 export * from "./health";
 export * from "./health-checks";
 export * from "./health-server";

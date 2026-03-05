@@ -10,12 +10,30 @@ Market Data -> Analyst Team -> Bullish/Bearish Research -> Debate -> Trader -> R
 npm install
 npm run build
 npm start
+# or:
+node dist/cli.js run --mode paper --asset SOL/USDT --timeframe 1h --limit 50
 ```
 
 ## Validation
 
 ```bash
 npm run validate
+# or:
+node dist/cli.js validate
+```
+
+## CLI Commands
+
+```bash
+vexis interactive
+vexis run [--asset SYMBOL --timeframe TF --limit N --mode backtest|paper|live-sim --output pretty|json --show-telemetry]
+vexis runner [--asset SYMBOL --timeframe TF --limit N --interval SEC --candle-align true|false --max-backoff SEC --mode ...]
+vexis ops tail [--run-id ... --trace-id ... --since ISO --severity info|warning|critical --limit N --json]
+vexis health [--check healthz|readyz --port N --json]
+vexis account check [--mode ... --json]
+vexis doctor [--json]
+vexis env check [--json]
+vexis validate
 ```
 
 ## Runtime Modes
@@ -68,12 +86,21 @@ HEALTH_SERVER_PORT=8787
 SIM_FEE_BPS=10
 SIM_SLIPPAGE_BPS=5
 SIM_PARTIAL_FILL_ENABLED=true
+
+BINANCE_API_KEY=your_key
+BINANCE_API_SECRET=your_secret
+BINANCE_ACCOUNT_ENABLED=true
+BINANCE_ACCOUNT_SCOPE=spot+usdm+coinm
+BINANCE_DEFAULT_EXPOSURE_PCT=8
+BINANCE_DEFAULT_DRAWDOWN_PCT=3
 ```
 
 - `OBS_PERSIST_ENABLED=true` stores telemetry + decision logs in SQLite.
 - `RUNNER_ENABLED=true` runs hybrid continuous mode (interval + candle alignment).
 - Backoff policy is automatic on critical failure streak/provider fail-hard.
 - Retention cleanup purges records older than `OBS_RETENTION_DAYS` when `OBS_CLEANUP_ENABLED=true`.
+- `BINANCE_ACCOUNT_ENABLED=true` enables auto portfolio read from Binance spot + USD-M + COIN-M futures.
+- Binance account fetch is fail-hard by default: cycle stops on auth/provider failure.
 - Health endpoints:
   - `GET /healthz` liveness
   - `GET /readyz` provider/LLM health + runner state snapshot

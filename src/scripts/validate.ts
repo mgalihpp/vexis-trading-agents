@@ -15,6 +15,7 @@ import {
   TraderAgent
 } from "../agents";
 import { defaultRiskRules } from "../config/risk";
+import { BinanceAccountProvider } from "../core/account-state";
 import { InMemoryEventStore, SqliteEventStorePersistence } from "../core/event-store";
 import { HealthMonitor } from "../core/health";
 import { computeBackoffDelay } from "../core/ops";
@@ -155,7 +156,7 @@ const buildPipeline = (runner: DecisionRunner) => {
   return { pipeline, eventStore, telemetrySink, healthMonitor };
 };
 
-const runDeterministicChecks = async (): Promise<void> => {
+export const runDeterministicChecks = async (): Promise<void> => {
   const { pipeline: fallbackPipeline } = buildPipeline(new MockDecisionRunner("fallback"));
   const fallbackRun = await fallbackPipeline.runCycle({
     runId: "validate-fallback",
@@ -440,6 +441,105 @@ const runDeterministicChecks = async (): Promise<void> => {
   assert.equal(altHits, 2, "Alternative.me fetch should refetch after TTL expiry");
   assert.equal(thenewsHits, 2, "TheNewsAPI fetch should refetch after TTL expiry");
 
+  const accountTelemetry = new InMemoryTelemetrySink(false);
+  const accountHealth = new HealthMonitor(accountTelemetry, {
+    maxP95RunLatencyMs: 30000,
+    maxFallbackRatio: 0.5,
+    maxConsecutiveFailures: 2
+  });
+
+  const mockSpotClient = {
+    fetchBalance: async () => ({
+      free: { USDT: 800, BTC: 0.01 },
+      total: { USDT: 1000, BTC: 0.02 }
+    }),
+    fetchTickers: async () => ({
+      "BTC/USDT": { bid: 70000, ask: 70100, last: 70050 }
+    })
+  };
+  const mockFuturesClient = {
+    fetchBalance: async () => ({
+      free: { USDT: 300 },
+      total: { USDT: 500 }
+    }),
+    fetchTickers: async () => ({})
+  };
+  const mockCoinmClient = {
+    fetchBalance: async () => ({
+      free: { USDT: 120 },
+      total: { USDT: 250 }
+    }),
+    fetchTickers: async () => ({})
+  };
+
+  const accountProvider = new BinanceAccountProvider({
+    enabled: true,
+    failHard: true,
+    apiKey: "k",
+    apiSecret: "s",
+    accountScope: "spot+usdm+coinm",
+    defaultExposurePct: 8,
+    defaultDrawdownPct: 3,
+    telemetrySink: accountTelemetry,
+    healthMonitor: accountHealth,
+    spotClient: mockSpotClient,
+    usdmClient: mockFuturesClient,
+    coinmClient: mockCoinmClient
+  });
+  const portfolioState = await accountProvider.getPortfolioState({
+    runId: "acct-run-1",
+    traceId: "acct-trace-1",
+    mode: "paper",
+    asset: "BTC/USDT"
+  });
+  assert.ok(portfolioState.equityUsd > 0, "Binance account provider should map equity from spot+usdm+coinm");
+  assert.ok(portfolioState.liquidityUsd > 0, "Binance account provider should map liquidity from spot+usdm+coinm");
+  assert.equal(
+    accountTelemetry.getMetrics().some((m) => m.name === "binance_account_fetch_success" && m.value === 1),
+    true,
+    "Binance account provider should emit success metric"
+  );
+  assert.equal(
+    accountTelemetry.getMetrics().some((m) => m.name === "binance_account_usdm_fetch_success" && m.value === 1),
+    true,
+    "Binance account provider should emit USD-M success metric"
+  );
+  assert.equal(
+    accountTelemetry.getMetrics().some((m) => m.name === "binance_account_coinm_fetch_success" && m.value === 1),
+    true,
+    "Binance account provider should emit COIN-M success metric"
+  );
+
+  const failingAccountProvider = new BinanceAccountProvider({
+    enabled: true,
+    failHard: true,
+    apiKey: "k",
+    apiSecret: "s",
+    accountScope: "spot+usdm+coinm",
+    defaultExposurePct: 8,
+    defaultDrawdownPct: 3,
+    spotClient: {
+      fetchBalance: async () => {
+        throw new Error("account down");
+      },
+      fetchTickers: async () => ({})
+    },
+    usdmClient: mockFuturesClient,
+    coinmClient: mockCoinmClient
+  });
+
+  await assert.rejects(
+    () =>
+      failingAccountProvider.getPortfolioState({
+        runId: "acct-run-2",
+        traceId: "acct-trace-2",
+        mode: "paper",
+        asset: "BTC/USDT"
+      }),
+    (error: unknown) => error instanceof ProviderError,
+    "Fail-hard account provider should throw on balance fetch error"
+  );
+
   const delayAttempt1 = computeBackoffDelay({ maxAttempts: 3, initialDelayMs: 100, backoffFactor: 2, maxDelayMs: 1000, jitterMs: 0 }, 1);
   const delayAttempt2 = computeBackoffDelay({ maxAttempts: 3, initialDelayMs: 100, backoffFactor: 2, maxDelayMs: 1000, jitterMs: 0 }, 2);
   assert.equal(delayAttempt1, 100, "Backoff attempt 1 should match initial delay when jitter is 0");
@@ -549,10 +649,13 @@ const runDeterministicChecks = async (): Promise<void> => {
   console.log("Validation checks passed.");
 };
 
-runDeterministicChecks().catch((error) => {
-  console.error("Validation failed", error);
-  process.exitCode = 1;
-});
+const isDirectRun = process.argv[1]?.includes("validate");
+if (isDirectRun) {
+  runDeterministicChecks().catch((error) => {
+    console.error("Validation failed", error);
+    process.exitCode = 1;
+  });
+}
 
 
 

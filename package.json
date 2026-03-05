@@ -3,19 +3,24 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "vexis": "dist/cli.js"
+  },
   "scripts": {
     "build": "tsup",
-    "start": "node dist/main.js",
-    "dev": "tsx src/main.ts",
-    "validate": "npm run build && node dist/scripts/validate.js",
-    "ops:tail": "npm run build && node dist/scripts/ops-tail.js"
+    "start": "node dist/cli.js run",
+    "dev": "tsx src/cli.ts run",
+    "validate": "npm run build && node dist/cli.js validate",
+    "ops:tail": "npm run build && node dist/cli.js ops tail"
   },
   "dependencies": {
+    "@inquirer/prompts": "^8.3.0",
     "@langchain/core": "^1.1.30",
     "@langchain/langgraph": "^1.2.0",
     "@langchain/openai": "^1.2.12",
     "better-sqlite3": "^12.4.1",
     "ccxt": "^4.5.19",
+    "commander": "^14.0.3",
     "dotenv": "^17.3.1",
     "langchain": "^1.2.29",
     "langsmith": "^0.5.7",

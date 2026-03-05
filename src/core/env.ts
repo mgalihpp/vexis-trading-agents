@@ -42,6 +42,12 @@ export interface RuntimeConfig {
   simFeeBps: number;
   simSlippageBps: number;
   simPartialFillEnabled: boolean;
+  binanceApiKey: string;
+  binanceApiSecret: string;
+  binanceAccountEnabled: boolean;
+  binanceAccountScope: "spot+usdm+coinm";
+  binanceDefaultExposurePct: number;
+  binanceDefaultDrawdownPct: number;
 }
 
 const asInt = (value: string | undefined, fallback: number): number => {
@@ -119,7 +125,16 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
     healthServerPort: asInt(process.env.HEALTH_SERVER_PORT, 8787),
     simFeeBps: asFloat(process.env.SIM_FEE_BPS, 0),
     simSlippageBps: asFloat(process.env.SIM_SLIPPAGE_BPS, 0),
-    simPartialFillEnabled: asBool(process.env.SIM_PARTIAL_FILL_ENABLED, false)
+    simPartialFillEnabled: asBool(process.env.SIM_PARTIAL_FILL_ENABLED, false),
+    binanceApiKey: secrets.get("BINANCE_API_KEY") ?? "",
+    binanceApiSecret: secrets.get("BINANCE_API_SECRET") ?? "",
+    binanceAccountEnabled: asBool(process.env.BINANCE_ACCOUNT_ENABLED, false),
+    binanceAccountScope:
+      process.env.BINANCE_ACCOUNT_SCOPE === "spot+usdm+coinm"
+        ? "spot+usdm+coinm"
+        : "spot+usdm+coinm",
+    binanceDefaultExposurePct: asFloat(process.env.BINANCE_DEFAULT_EXPOSURE_PCT, 8),
+    binanceDefaultDrawdownPct: asFloat(process.env.BINANCE_DEFAULT_DRAWDOWN_PCT, 3)
   };
 
   cfg.openRouterBaseUrl = asHttpUrl(cfg.openRouterBaseUrl, "OPENROUTER_BASE_URL");
@@ -147,6 +162,9 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
   failIf(cfg.healthServerPort < 1 || cfg.healthServerPort > 65535, "HEALTH_SERVER_PORT must be within 1..65535");
   failIf(cfg.simFeeBps < 0, "SIM_FEE_BPS must be >= 0");
   failIf(cfg.simSlippageBps < 0, "SIM_SLIPPAGE_BPS must be >= 0");
+  failIf(cfg.binanceAccountScope !== "spot+usdm+coinm", "BINANCE_ACCOUNT_SCOPE currently supports only 'spot+usdm+coinm'");
+  failIf(cfg.binanceDefaultExposurePct < 0 || cfg.binanceDefaultExposurePct > 100, "BINANCE_DEFAULT_EXPOSURE_PCT must be within 0..100");
+  failIf(cfg.binanceDefaultDrawdownPct < 0 || cfg.binanceDefaultDrawdownPct > 100, "BINANCE_DEFAULT_DRAWDOWN_PCT must be within 0..100");
 
   if (cfg.obsPersistEnabled) {
     const resolvedDbPath = path.resolve(cfg.obsSqlitePath);
@@ -159,6 +177,11 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
   if (cfg.strictRealMode) {
     failIf(!cfg.theNewsApiKey, "THENEWSAPI_KEY is required when STRICT_REAL_MODE=true");
     failIf(!cfg.openRouterApiKey, "OPENROUTER_API_KEY is required when STRICT_REAL_MODE=true");
+  }
+
+  if (cfg.binanceAccountEnabled) {
+    failIf(!cfg.binanceApiKey, "BINANCE_API_KEY is required when BINANCE_ACCOUNT_ENABLED=true");
+    failIf(!cfg.binanceApiSecret, "BINANCE_API_SECRET is required when BINANCE_ACCOUNT_ENABLED=true");
   }
 
   return cfg;

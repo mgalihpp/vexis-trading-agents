@@ -8,7 +8,7 @@ export interface RunnerServiceDeps {
   mode: PipelineMode;
   outputFormat: OutputFormat;
   pipeline: TradingPipeline;
-  runInputFactory: (runId: string, traceId: string, mode: PipelineMode) => {
+  runInputFactory: (runId: string, traceId: string, mode: PipelineMode) => Promise<{
     runId: string;
     traceId: string;
     mode: PipelineMode;
@@ -19,7 +19,7 @@ export interface RunnerServiceDeps {
       currentDrawdownPct: number;
       liquidityUsd: number;
     };
-  };
+  }>;
   onCycleResult: (result: PipelineRunResult, state: RunnerState) => Promise<void>;
   onCycleError: (error: unknown, runId: string, traceId: string, state: RunnerState) => Promise<void>;
   onState: (state: RunnerState) => Promise<void>;
@@ -79,7 +79,8 @@ export class RunnerService {
       state.lastTraceId = traceId;
 
       try {
-        const result = await this.deps.pipeline.runCycle(this.deps.runInputFactory(runId, traceId, this.deps.mode));
+        const runInput = await this.deps.runInputFactory(runId, traceId, this.deps.mode);
+        const result = await this.deps.pipeline.runCycle(runInput);
 
         const { alerts, nextIndex } = this.deps.getNewCriticalAlerts(this.alertCursor);
         this.alertCursor = nextIndex;

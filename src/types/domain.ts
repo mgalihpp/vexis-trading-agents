@@ -404,3 +404,37 @@ export interface RunnerHeartbeatMetric {
   backoffLevel: number;
   timestamp: string;
 }
+
+export interface BinanceAccountSnapshot {
+  provider: "binance-account";
+  scope: "spot+usdm+coinm";
+  spot_equity_usd: number;
+  spot_liquidity_usd: number;
+  usdm_equity_usd: number;
+  usdm_liquidity_usd: number;
+  coinm_equity_usd: number;
+  coinm_liquidity_usd: number;
+  total_equity_usd: number;
+  total_liquidity_usd: number;
+  spot_assets_count: number;
+  usdm_assets_count: number;
+  coinm_assets_count: number;
+  timestamp: string;
+}
+
+export interface CliGlobalOptions {
+  json?: boolean;
+  output?: OutputFormat;
+  mode?: PipelineMode;
+}
+
+export interface CliCommandResult {
+  exitCode: number;
+  message?: string;
+  data?: JSONValue;
+}
+
+export interface EffectiveConfigView {
+  effective: Record<string, JSONValue>;
+  source: Record<string, "flag" | "env" | "default">;
+}

@@ -12,6 +12,7 @@ import {
   TraderAgent
 } from "./agents";
 import { defaultRiskRules } from "./config/risk";
+import { BinanceAccountProvider, StaticPortfolioStateProvider } from "./core/account-state";
 import { loadRuntimeConfig } from "./core/env";
 import { InMemoryEventStore, SqliteEventStorePersistence } from "./core/event-store";
 import { HealthServer } from "./core/health-server";
@@ -22,22 +23,73 @@ import { TradingPipeline, createModeDataProvider } from "./core/pipeline";
 import { RunnerService } from "./core/runner";
 import { FanoutTelemetrySink, InMemoryTelemetrySink, SqliteTelemetrySink } from "./core/telemetry";
 import { SimulatedExchange } from "./sim/simulated-exchange";
-import type { OutputFormat, PipelineMode, RunnerState, TelemetrySink } from "./types";
+import type {
+  AccountStateProvider,
+  MarketDataQuery,
+  OutputFormat,
+  PipelineMode,
+  RunnerState,
+  TelemetrySink
+} from "./types";
 import { printRunReport } from "./utils/report";
 
-const modeFromEnv = (process.env.PIPELINE_MODE as PipelineMode | undefined) ?? "backtest";
-const outputFormatFromEnv = (process.env.OUTPUT_FORMAT as OutputFormat | undefined) ?? "pretty";
-const showTelemetry = (process.env.SHOW_TELEMETRY ?? "false").toLowerCase() === "true";
-const telemetryConsoleMirror = (process.env.TELEMETRY_CONSOLE ?? "false").toLowerCase() === "true";
+export interface AppRunOverrides {
+  mode?: PipelineMode;
+  outputFormat?: OutputFormat;
+  showTelemetry?: boolean;
+  telemetryConsoleMirror?: boolean;
+  runnerEnabled?: boolean;
+  runnerIntervalSeconds?: number;
+  runnerCandleAlign?: boolean;
+  runnerMaxBackoffSeconds?: number;
+  query?: Partial<MarketDataQuery>;
+}
 
-const run = async (): Promise<void> => {
+const modeFromEnv = (): PipelineMode =>
+  (process.env.PIPELINE_MODE as PipelineMode | undefined) ?? "backtest";
+
+const outputFormatFromEnv = (): OutputFormat =>
+  (process.env.OUTPUT_FORMAT as OutputFormat | undefined) ?? "pretty";
+
+const boolEnv = (name: string, fallback: boolean): boolean => {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+};
+
+export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => {
   const runtime = loadRuntimeConfig();
 
-  const memorySink = new InMemoryTelemetrySink(telemetryConsoleMirror);
-  const sqliteSink = runtime.obsPersistEnabled ? new SqliteTelemetrySink(runtime.obsSqlitePath) : null;
-  const sink: TelemetrySink = sqliteSink ? new FanoutTelemetrySink([memorySink, sqliteSink]) : memorySink;
+  const mode = overrides.mode ?? modeFromEnv();
+  const outputFormat = overrides.outputFormat ?? outputFormatFromEnv();
+  const showTelemetry = overrides.showTelemetry ?? boolEnv("SHOW_TELEMETRY", false);
+  const telemetryConsoleMirror =
+    overrides.telemetryConsoleMirror ?? boolEnv("TELEMETRY_CONSOLE", false);
+  const runnerEnabled = overrides.runnerEnabled ?? runtime.runnerEnabled;
+  const runnerIntervalSeconds =
+    overrides.runnerIntervalSeconds ?? runtime.runnerIntervalSeconds;
+  const runnerCandleAlign = overrides.runnerCandleAlign ?? runtime.runnerCandleAlign;
+  const runnerMaxBackoffSeconds =
+    overrides.runnerMaxBackoffSeconds ?? runtime.runnerMaxBackoffSeconds;
 
-  const eventPersistence = runtime.obsPersistEnabled ? new SqliteEventStorePersistence(runtime.obsSqlitePath) : undefined;
+  const query: MarketDataQuery = {
+    asset: overrides.query?.asset ?? "SOL/USDT",
+    timeframe: overrides.query?.timeframe ?? "1h",
+    limit: Math.max(1, overrides.query?.limit ?? 50),
+    since: overrides.query?.since
+  };
+
+  const memorySink = new InMemoryTelemetrySink(telemetryConsoleMirror);
+  const sqliteSink = runtime.obsPersistEnabled
+    ? new SqliteTelemetrySink(runtime.obsSqlitePath)
+    : null;
+  const sink: TelemetrySink = sqliteSink
+    ? new FanoutTelemetrySink([memorySink, sqliteSink])
+    : memorySink;
+
+  const eventPersistence = runtime.obsPersistEnabled
+    ? new SqliteEventStorePersistence(runtime.obsSqlitePath)
+    : undefined;
   const eventStore = new InMemoryEventStore(eventPersistence);
 
   const healthMonitor = new HealthMonitor(sink, {
@@ -56,21 +108,31 @@ const run = async (): Promise<void> => {
     healthMonitor
   });
 
-  const baseRunInput = {
-    query: {
-      asset: "SOL/USDT",
-      timeframe: "1h",
-      limit: 50
-    },
-    portfolio: {
-      equityUsd: 50,
-      currentExposurePct: 8,
-      currentDrawdownPct: 3,
-      liquidityUsd: 1400000
-    }
-  };
+  const staticPortfolioProvider = new StaticPortfolioStateProvider({
+    equityUsd: 50,
+    currentExposurePct: runtime.binanceDefaultExposurePct,
+    currentDrawdownPct: runtime.binanceDefaultDrawdownPct,
+    liquidityUsd: 1400000
+  });
 
-  const marketDataProvider = createModeDataProvider(modeFromEnv, {
+  const accountStateProvider: AccountStateProvider =
+    runtime.binanceAccountEnabled && mode !== "backtest"
+      ? new BinanceAccountProvider({
+          enabled: true,
+          failHard: true,
+          apiKey: runtime.binanceApiKey,
+          apiSecret: runtime.binanceApiSecret,
+          accountScope: runtime.binanceAccountScope,
+          defaultExposurePct: runtime.binanceDefaultExposurePct,
+          defaultDrawdownPct: runtime.binanceDefaultDrawdownPct,
+          telemetrySink: sink,
+          healthMonitor,
+          mode,
+          timeoutMs: runtime.nodeTimeoutMs
+        })
+      : staticPortfolioProvider;
+
+  const marketDataProvider = createModeDataProvider(mode, {
     strictRealMode: runtime.strictRealMode,
     theNewsApiKey: runtime.theNewsApiKey,
     coinGeckoApiKey: runtime.coinGeckoApiKey,
@@ -80,7 +142,7 @@ const run = async (): Promise<void> => {
     providerCacheTtlSeconds: runtime.providerCacheTtlSeconds,
     traceId: "trace-bootstrap",
     runId: "run-bootstrap",
-    mode: modeFromEnv,
+    mode,
     requestsPerSecond: runtime.externalRequestsPerSecond,
     timeoutMs: runtime.nodeTimeoutMs,
     retryPolicy: {
@@ -102,11 +164,11 @@ const run = async (): Promise<void> => {
     llmMaxRetries: runtime.llmMaxRetries,
     runTimeoutMs: runtime.runTimeoutMs,
     nodeTimeoutMs: runtime.nodeTimeoutMs,
-    mode: modeFromEnv,
+    mode,
     contextFactory: (input, trace) => ({
       runId: input.runId,
       traceId: trace,
-      mode: input.mode ?? modeFromEnv,
+      mode: input.mode ?? mode,
       asset: input.query.asset,
       nowIso: () => new Date().toISOString()
     }),
@@ -132,19 +194,25 @@ const run = async (): Promise<void> => {
   const printCycle = async (result: PipelineRunResult): Promise<void> => {
     printRunReport({
       runId: result.logs[0]?.runId ?? "unknown",
-      mode: modeFromEnv,
-      query: baseRunInput.query,
+      mode,
+      query,
       result,
-      outputFormat: outputFormatFromEnv
+      outputFormat
     });
 
     if (showTelemetry) {
       console.log("--- Telemetry ---");
-      console.log(JSON.stringify({
-        metrics: memorySink.getMetrics(),
-        alerts: memorySink.getAlerts(),
-        logs: memorySink.getLogs()
-      }, null, 2));
+      console.log(
+        JSON.stringify(
+          {
+            metrics: memorySink.getMetrics(),
+            alerts: memorySink.getAlerts(),
+            logs: memorySink.getLogs()
+          },
+          null,
+          2
+        )
+      );
 
       if (sqliteSink) {
         console.log("--- Persisted Recent Runs ---");
@@ -152,7 +220,15 @@ const run = async (): Promise<void> => {
       }
 
       console.log("--- Health Snapshot ---");
-      console.log(JSON.stringify(healthMonitor.getSnapshot(() => new Date().toISOString()), null, 2));
+      console.log(
+        JSON.stringify(healthMonitor.getSnapshot(() => new Date().toISOString()), null, 2)
+      );
+
+      const accountSnapshot = accountStateProvider.getLastSnapshot();
+      if (accountSnapshot) {
+        console.log("--- Binance Account Snapshot ---");
+        console.log(JSON.stringify(accountSnapshot, null, 2));
+      }
     }
   };
 
@@ -170,8 +246,8 @@ const run = async (): Promise<void> => {
       tags: {
         run_id: runId,
         trace_id: traceId,
-        mode: modeFromEnv,
-        asset: baseRunInput.query.asset,
+        mode,
+        asset: query.asset,
         node: "Runner",
         source: "system",
         provider: ""
@@ -184,8 +260,8 @@ const run = async (): Promise<void> => {
       tags: {
         run_id: runId,
         trace_id: traceId,
-        mode: modeFromEnv,
-        asset: baseRunInput.query.asset,
+        mode,
+        asset: query.asset,
         node: "Runner",
         source: "system",
         provider: ""
@@ -198,8 +274,8 @@ const run = async (): Promise<void> => {
       tags: {
         run_id: runId,
         trace_id: traceId,
-        mode: modeFromEnv,
-        asset: baseRunInput.query.asset,
+        mode,
+        asset: query.asset,
         node: "Runner",
         source: "system",
         provider: "",
@@ -214,8 +290,8 @@ const run = async (): Promise<void> => {
       value: 1,
       timestamp: new Date().toISOString(),
       tags: {
-        mode: modeFromEnv,
-        asset: baseRunInput.query.asset,
+        mode,
+        asset: query.asset,
         node: "Runner",
         source: "system",
         provider: "",
@@ -238,7 +314,7 @@ const run = async (): Promise<void> => {
       level: "info",
       message: `observability retention cleanup cutoff=${cutoffIso}`,
       trace_id: "system",
-      tags: { mode: modeFromEnv, node: "Retention", source: "system" },
+      tags: { mode, node: "Retention", source: "system" },
       data: { ...result }
     });
   };
@@ -256,74 +332,85 @@ const run = async (): Promise<void> => {
     getLastRun: () => healthMonitor.getLastRunSample()
   });
   await healthServer.start();
+
   try {
-    if (runtime.runnerEnabled) {
+    if (runnerEnabled) {
       const runner = new RunnerService({
-      config: {
-        enabled: runtime.runnerEnabled,
-        intervalSeconds: runtime.runnerIntervalSeconds,
-        candleAlign: runtime.runnerCandleAlign,
-        maxBackoffSeconds: runtime.runnerMaxBackoffSeconds,
-        query: baseRunInput.query,
-        portfolio: baseRunInput.portfolio
-      },
-      mode: modeFromEnv,
-      outputFormat: outputFormatFromEnv,
-      pipeline,
-      runInputFactory: (runId, traceId, mode) => ({
-        runId,
-        traceId,
+        config: {
+          enabled: runnerEnabled,
+          intervalSeconds: runnerIntervalSeconds,
+          candleAlign: runnerCandleAlign,
+          maxBackoffSeconds: runnerMaxBackoffSeconds,
+          query,
+          portfolio: await accountStateProvider.getPortfolioState({
+            runId: "run-bootstrap",
+            traceId: "trace-bootstrap",
+            mode,
+            asset: query.asset
+          })
+        },
         mode,
-        query: baseRunInput.query,
-        portfolio: baseRunInput.portfolio
-      }),
-      onCycleResult: async (result, state) => {
-        const runId = result.logs[0]?.runId ?? "";
-        await emitRunnerCycleMetrics(
-          runId,
-          result.traceId,
-          state.currentIntervalSeconds,
-          state.backoffLevel
-        );
-        await runRetentionCleanup();
-        await printCycle(result);
-      },
-      onCycleError: async (error, runId, traceId, state) => {
-        await emitRunnerCycleMetrics(
+        outputFormat,
+        pipeline,
+        runInputFactory: async (runId, traceId, currentMode) => ({
           runId,
           traceId,
-          state.currentIntervalSeconds,
-          state.backoffLevel
-        );
-        await runRetentionCleanup();
-        await sink.emitAlert({
-          timestamp: new Date().toISOString(),
-          name: "runner_cycle_failure",
-          severity: "critical",
-          trace_id: traceId,
-          tags: {
-            run_id: runId,
+          mode: currentMode,
+          query,
+          portfolio: await accountStateProvider.getPortfolioState({
+            runId,
+            traceId,
+            mode: currentMode,
+            asset: query.asset
+          })
+        }),
+        onCycleResult: async (result, state) => {
+          const runId = result.logs[0]?.runId ?? "";
+          await emitRunnerCycleMetrics(
+            runId,
+            result.traceId,
+            state.currentIntervalSeconds,
+            state.backoffLevel
+          );
+          await runRetentionCleanup();
+          await printCycle(result);
+        },
+        onCycleError: async (error, runId, traceId, state) => {
+          await emitRunnerCycleMetrics(
+            runId,
+            traceId,
+            state.currentIntervalSeconds,
+            state.backoffLevel
+          );
+          await runRetentionCleanup();
+          await sink.emitAlert({
+            timestamp: new Date().toISOString(),
+            name: "runner_cycle_failure",
+            severity: "critical",
             trace_id: traceId,
-            mode: modeFromEnv,
-            asset: baseRunInput.query.asset,
-            node: "Runner",
-            source: "system",
-            provider: ""
-          },
-          message: String(error)
-        });
-      },
-      onState: async (state) => {
-        runnerStateSnapshot = state;
-        await emitRunnerHeartbeat(state);
-      },
-      getNewCriticalAlerts: (sinceIndex) => {
-        const allAlerts = memorySink.getAlerts();
-        const delta = allAlerts.slice(Math.max(0, sinceIndex));
-        const critical = delta.filter((a) => a.severity === "critical");
-        return { alerts: critical, nextIndex: allAlerts.length };
-      }
-    });
+            tags: {
+              run_id: runId,
+              trace_id: traceId,
+              mode,
+              asset: query.asset,
+              node: "Runner",
+              source: "system",
+              provider: ""
+            },
+            message: String(error)
+          });
+        },
+        onState: async (state) => {
+          runnerStateSnapshot = state;
+          await emitRunnerHeartbeat(state);
+        },
+        getNewCriticalAlerts: (sinceIndex) => {
+          const allAlerts = memorySink.getAlerts();
+          const delta = allAlerts.slice(Math.max(0, sinceIndex));
+          const critical = delta.filter((a) => a.severity === "critical");
+          return { alerts: critical, nextIndex: allAlerts.length };
+        }
+      });
 
       console.log("Runner mode enabled: hybrid continuous cycle started.");
       await runner.start();
@@ -332,12 +419,18 @@ const run = async (): Promise<void> => {
 
     const runId = "run-main-001";
     const traceId = randomUUID();
+    const portfolio = await accountStateProvider.getPortfolioState({
+      runId,
+      traceId,
+      mode,
+      asset: query.asset
+    });
     const result = await pipeline.runCycle({
       runId,
       traceId,
-      mode: modeFromEnv,
-      query: baseRunInput.query,
-      portfolio: baseRunInput.portfolio
+      mode,
+      query,
+      portfolio
     });
 
     await printCycle(result);
@@ -346,7 +439,10 @@ const run = async (): Promise<void> => {
   }
 };
 
-run().catch((error) => {
-  console.error("Pipeline execution failed", error);
-  process.exitCode = 1;
-});
+const isDirectRun = process.argv[1]?.includes("main");
+if (isDirectRun) {
+  runApp().catch((error) => {
+    console.error("Pipeline execution failed", error);
+    process.exitCode = 1;
+  });
+}

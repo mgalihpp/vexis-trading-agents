@@ -1,3 +1,4 @@
+import type { RuntimeConfig } from "../core/env";
 import { loadRuntimeConfig } from "../core/env";
 import { SqliteTelemetrySink, type RecentRunRecord } from "../core/telemetry";
 import type { AlertEvent, AlertSeverity } from "../types";
@@ -81,9 +82,12 @@ const formatCompact = (payload: {
   return lines.join("\n");
 };
 
-const main = async (): Promise<void> => {
-  const runtime = loadRuntimeConfig();
-  const flags = parseArgs(process.argv.slice(2));
+export const runOpsTail = async (
+  argv: string[] = process.argv.slice(2),
+  runtimeInput?: RuntimeConfig
+): Promise<void> => {
+  const runtime = runtimeInput ?? loadRuntimeConfig();
+  const flags = parseArgs(argv);
 
   if (!runtime.obsPersistEnabled) {
     console.error("OBS_PERSIST_ENABLED is false. Enable it to use ops:tail.");
@@ -136,7 +140,10 @@ const main = async (): Promise<void> => {
   );
 };
 
-main().catch((error) => {
-  console.error("ops:tail failed", error);
-  process.exitCode = 1;
-});
+const isDirectRun = process.argv[1]?.includes("ops-tail");
+if (isDirectRun) {
+  runOpsTail().catch((error) => {
+    console.error("ops:tail failed", error);
+    process.exitCode = 1;
+  });
+}

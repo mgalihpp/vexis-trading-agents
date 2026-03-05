@@ -1,6 +1,7 @@
 import type {
   AgentContext,
   AlertEvent,
+  BinanceAccountSnapshot,
   DecisionLogEntry,
   FundamentalsData,
   HealthStatus,
@@ -9,6 +10,7 @@ import type {
   MetricSample,
   NewsEvent,
   OHLCVCandle,
+  PortfolioState,
   ProviderFetchResult,
   SentimentSignal,
   TelemetryEvent
@@ -65,5 +67,21 @@ export interface NewsProvider {
 
 export interface SecretProvider {
   get(name: string): string | undefined;
+}
+
+export interface AccountStateProvider {
+  getPortfolioState(ctx: {
+    runId: string;
+    traceId: string;
+    mode: string;
+    asset: string;
+  }): Promise<PortfolioState>;
+  getLastSnapshot(): BinanceAccountSnapshot | null;
+  setRunContext?(ctx: {
+    runId: string;
+    traceId: string;
+    mode: string;
+    asset?: string;
+  }): void;
 }
 
