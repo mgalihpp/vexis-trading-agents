@@ -43,6 +43,12 @@ export interface HealthCheck {
 export interface MarketDataProvider {
   getSnapshot(query: MarketDataQuery): Promise<MarketSnapshot>;
   streamCandles?(query: MarketDataQuery): AsyncIterable<OHLCVCandle>;
+  setRunContext?(ctx: {
+    runId: string;
+    traceId: string;
+    mode: string;
+    asset?: string;
+  }): void;
 }
 
 export interface FundamentalsProvider {
@@ -60,3 +66,4 @@ export interface NewsProvider {
 export interface SecretProvider {
   get(name: string): string | undefined;
 }
+

@@ -231,6 +231,12 @@ const buildGraph = (deps: PipelineDeps, ctx: AgentContext, budget: TimeoutBudget
     .addNode(
       "market_data_node",
       wrapNode("MarketData", async (state: TradingStateType) => {
+        deps.marketDataProvider.setRunContext?.({
+          runId: ctx.runId,
+          traceId: ctx.traceId,
+          mode: ctx.mode,
+          asset: state.query.asset
+        });
         const snapshot = await deps.marketDataProvider.getSnapshot(state.query);
         await appendLog(
           deps.eventStore,

@@ -401,6 +401,12 @@ export class BacktestDataProvider implements MarketDataProvider {
     };
   }
 
+  public setRunContext(
+    _ctx: { runId: string; traceId: string; mode: string; asset?: string },
+  ): void {
+    // No-op for deterministic fixtures.
+  }
+
   public async *streamCandles(
     query: MarketDataQuery,
   ): AsyncIterable<OHLCVCandle> {
@@ -433,9 +439,9 @@ export class RealCryptoDataProvider implements MarketDataProvider {
   >;
   private readonly governor: RateLimitGovernor;
   private readonly timeoutMs: number;
-  private readonly traceId: string;
-  private readonly runId: string;
-  private readonly mode: "backtest" | "paper" | "live-sim";
+  private traceId: string;
+  private runId: string;
+  private mode: "backtest" | "paper" | "live-sim";
   private marketsLoaded = false;
 
   public constructor(private readonly config: RealDataProviderConfig) {
@@ -579,6 +585,22 @@ export class RealCryptoDataProvider implements MarketDataProvider {
         newsResult,
       ],
     };
+  }
+
+  public setRunContext(ctx: {
+    runId: string;
+    traceId: string;
+    mode: string;
+    asset?: string;
+  }): void {
+    this.runId = ctx.runId;
+    this.traceId = ctx.traceId;
+    this.mode =
+      ctx.mode === "live-sim"
+        ? "live-sim"
+        : ctx.mode === "backtest"
+          ? "backtest"
+          : "paper";
   }
 
   public async *streamCandles(
@@ -812,3 +834,4 @@ export class RealCryptoDataProvider implements MarketDataProvider {
     );
   }
 }
+

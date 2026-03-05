@@ -31,6 +31,7 @@ export class HealthMonitor {
   private consecutiveFailures = 0;
   private readonly runs: RunHealthSample[] = [];
   private lastSuccessfulRun: string | undefined;
+  private lastRunSample: RunHealthSample | null = null;
 
   public constructor(private readonly sink: TelemetrySink, private readonly slo: SLOConfig) {}
 
@@ -45,6 +46,7 @@ export class HealthMonitor {
 
   public async recordRun(sample: RunHealthSample): Promise<void> {
     this.runs.push(sample);
+    this.lastRunSample = sample;
     if (sample.success) {
       this.consecutiveFailures = 0;
       this.lastSuccessfulRun = sample.runId;
@@ -136,6 +138,10 @@ export class HealthMonitor {
     });
 
     return providerStatuses;
+  }
+
+  public getLastRunSample(): RunHealthSample | null {
+    return this.lastRunSample;
   }
 
   public async emitProviderFailureAlert(args: {

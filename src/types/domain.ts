@@ -317,12 +317,30 @@ export interface PnLSnapshot {
   totalUsd: number;
 }
 
+export interface OrderFillEvent {
+  order_status: "new" | "partial" | "filled" | "canceled";
+  filled_notional_usd: number;
+  remaining_notional_usd: number;
+  fill_price: number;
+  fee_usd: number;
+  slippage_bps: number;
+}
+
+export interface ExecutionDetails {
+  fee_bps: number;
+  fee_usd: number;
+  slippage_bps: number;
+  slippage_usd: number;
+  order_events: OrderFillEvent[];
+}
+
 export interface ExecutionReport {
   decision: ExecutionDecision;
   filled: boolean;
   fillPrice: number | null;
   position: Position | null;
   pnl: PnLSnapshot;
+  execution_details?: ExecutionDetails;
 }
 
 export interface AgentContext {
@@ -345,3 +363,44 @@ export interface StreamControl {
 }
 
 export interface JSONEnvelope extends JSONObject {}
+
+export interface ObservabilityStorageConfig {
+  persistEnabled: boolean;
+  sqlitePath: string;
+}
+
+export interface RunnerConfig {
+  enabled: boolean;
+  intervalSeconds: number;
+  candleAlign: boolean;
+  maxBackoffSeconds: number;
+  query: MarketDataQuery;
+  portfolio: PortfolioState;
+}
+
+export interface RunnerState {
+  status: "idle" | "running" | "stopped";
+  backoffLevel: number;
+  currentIntervalSeconds: number;
+  nextRunAtIso: string;
+  lastRunId?: string;
+  lastTraceId?: string;
+  consecutiveFailures: number;
+}
+
+export interface RetentionConfig {
+  enabled: boolean;
+  retentionDays: number;
+}
+
+export interface HealthServerConfig {
+  enabled: boolean;
+  port: number;
+}
+
+export interface RunnerHeartbeatMetric {
+  status: "normal" | "backoff" | "stopped";
+  intervalSeconds: number;
+  backoffLevel: number;
+  timestamp: string;
+}

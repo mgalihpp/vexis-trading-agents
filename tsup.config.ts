@@ -1,7 +1,7 @@
-﻿import { defineConfig } from "tsup";
+import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/main.ts", "src/scripts/validate.ts"],
+  entry: ["src/main.ts", "src/scripts/validate.ts", "src/scripts/ops-tail.ts"],
   format: ["esm"],
   dts: true,
   sourcemap: true,

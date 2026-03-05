@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   BearishResearcher,
   BullishResearcher,
@@ -12,13 +15,14 @@ import {
   TraderAgent
 } from "../agents";
 import { defaultRiskRules } from "../config/risk";
-import { InMemoryEventStore } from "../core/event-store";
+import { InMemoryEventStore, SqliteEventStorePersistence } from "../core/event-store";
 import { HealthMonitor } from "../core/health";
 import { computeBackoffDelay } from "../core/ops";
-import { InMemoryTelemetrySink } from "../core/telemetry";
+import { InMemoryTelemetrySink, SqliteTelemetrySink } from "../core/telemetry";
 import type { DecisionRunner } from "../core/llm-runner";
 import { BacktestDataProvider, RealCryptoDataProvider } from "../core/market-data";
 import { TradingPipeline } from "../core/pipeline";
+import { RunnerService } from "../core/runner";
 import {
   debateOutputSchema,
   executionDecisionSchema,
@@ -441,6 +445,107 @@ const runDeterministicChecks = async (): Promise<void> => {
   assert.equal(delayAttempt1, 100, "Backoff attempt 1 should match initial delay when jitter is 0");
   assert.equal(delayAttempt2, 200, "Backoff attempt 2 should scale by factor");
 
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vexis-obs-"));
+  const dbPath = path.join(tmpDir, "observability.db");
+
+  const sqliteTelemetry = new SqliteTelemetrySink(dbPath);
+  await sqliteTelemetry.emitMetric({
+    name: "run_success",
+    value: 1,
+    timestamp: "2026-03-05T00:00:00.000Z",
+    tags: {
+      run_id: "run-sql-1",
+      trace_id: "trace-sql-1",
+      mode: "backtest",
+      asset: "BTC/USDT",
+      node: "Pipeline",
+      provider: "",
+      source: "system"
+    }
+  });
+  await sqliteTelemetry.emitAlert({
+    timestamp: "2026-03-05T00:00:01.000Z",
+    name: "provider_fail_hard",
+    severity: "critical",
+    trace_id: "trace-sql-1",
+    tags: {
+      run_id: "run-sql-1",
+      trace_id: "trace-sql-1",
+      mode: "backtest",
+      asset: "BTC/USDT",
+      node: "Pipeline",
+      provider: "thenewsapi",
+      source: "system"
+    },
+    message: "provider down"
+  });
+
+  const recentRuns = sqliteTelemetry.getRecentRuns(5);
+  assert.ok(recentRuns.some((r) => r.run_id === "run-sql-1"), "SQLite telemetry should persist recent runs");
+  const recentAlerts = sqliteTelemetry.getAlerts({
+    sinceIso: "2026-03-05T00:00:00.000Z",
+    severity: "critical"
+  });
+  assert.ok(recentAlerts.some((a) => a.name === "provider_fail_hard"), "SQLite telemetry should persist alerts");
+
+  const eventPersistence = new SqliteEventStorePersistence(dbPath);
+  const persistStore = new InMemoryEventStore(eventPersistence);
+  await persistStore.append({
+    runId: "run-sql-1",
+    traceId: "trace-sql-1",
+    agent: "TraderAgent",
+    timestamp: "2026-03-05T00:00:02.000Z",
+    inputPayload: { ok: true },
+    outputPayload: { ok: true },
+    decisionRationale: "persist test",
+    source: "system",
+    retries: 0
+  });
+  const loaded = await eventPersistence.load();
+  assert.ok(loaded.some((e) => e.runId === "run-sql-1" && e.agent === "TraderAgent"), "SQLite event persistence should restore logs");
+
+  const runTrace = sqliteTelemetry.getRunTrace({ runId: "run-sql-1" });
+  assert.ok(runTrace.metrics.length > 0, "SQLite run trace should include metrics");
+  const purged = sqliteTelemetry.purgeOlderThan("2026-03-06T00:00:00.000Z");
+  assert.ok(purged.telemetryMetricsDeleted >= 1, "Retention purge should delete old telemetry metrics");
+
+  const exchStore = new InMemoryEventStore();
+  const realisticExchange = new SimulatedExchange(exchStore, {
+    feeBps: 10,
+    slippageBps: 5,
+    partialFillEnabled: true
+  });
+  const executionReport = await realisticExchange.run(
+    {
+      decision: {
+        approve: true,
+        capital_allocated: 1000,
+        execution_instructions: {
+          type: "market",
+          tif: "IOC",
+          side: "buy",
+          quantity_notional_usd: 1000
+        },
+        reasons: ["validate"]
+      },
+      proposal: {
+        asset: "BTC/USDT",
+        side: "long",
+        entry: 70000,
+        stop_loss: 68000,
+        take_profit: 74000,
+        position_size_pct: 30,
+        timeframe: "1h",
+        reasoning: "validate"
+      },
+      marketPrice: 70000
+    },
+    { runId: "x", traceId: "t", mode: "backtest", asset: "BTC/USDT", nowIso: () => "2026-03-05T00:00:00.000Z" }
+  );
+  assert.ok(executionReport.execution_details, "Execution report should include execution_details");
+  assert.ok((executionReport.execution_details?.order_events.length ?? 0) >= 2, "Execution details should include order lifecycle events");
+
+
   console.log("Validation checks passed.");
 };
 
@@ -448,6 +553,13 @@ runDeterministicChecks().catch((error) => {
   console.error("Validation failed", error);
   process.exitCode = 1;
 });
+
+
+
+
+
+
+
 
 
 

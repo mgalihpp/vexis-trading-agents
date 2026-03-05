@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { config as loadDotEnv } from "dotenv";
 import { EnvSecretProvider } from "./secrets";
 
@@ -27,6 +29,19 @@ export interface RuntimeConfig {
   sloP95RunLatencyMs: number;
   sloMaxFallbackRatio: number;
   sloMaxConsecutiveFailures: number;
+  obsPersistEnabled: boolean;
+  obsSqlitePath: string;
+  obsRetentionDays: number;
+  obsCleanupEnabled: boolean;
+  runnerEnabled: boolean;
+  runnerIntervalSeconds: number;
+  runnerCandleAlign: boolean;
+  runnerMaxBackoffSeconds: number;
+  healthServerEnabled: boolean;
+  healthServerPort: number;
+  simFeeBps: number;
+  simSlippageBps: number;
+  simPartialFillEnabled: boolean;
 }
 
 const asInt = (value: string | undefined, fallback: number): number => {
@@ -91,7 +106,20 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
     providerRetryJitterMs: asInt(process.env.PROVIDER_RETRY_JITTER_MS, 120),
     sloP95RunLatencyMs: asInt(process.env.SLO_P95_RUN_LATENCY_MS, 15000),
     sloMaxFallbackRatio: asFloat(process.env.SLO_MAX_FALLBACK_RATIO, 0.4),
-    sloMaxConsecutiveFailures: asInt(process.env.SLO_MAX_CONSECUTIVE_FAILURES, 3)
+    sloMaxConsecutiveFailures: asInt(process.env.SLO_MAX_CONSECUTIVE_FAILURES, 3),
+    obsPersistEnabled: asBool(process.env.OBS_PERSIST_ENABLED, false),
+    obsSqlitePath: process.env.OBS_SQLITE_PATH ?? "./data/observability.db",
+    obsRetentionDays: asInt(process.env.OBS_RETENTION_DAYS, 30),
+    obsCleanupEnabled: asBool(process.env.OBS_CLEANUP_ENABLED, false),
+    runnerEnabled: asBool(process.env.RUNNER_ENABLED, false),
+    runnerIntervalSeconds: asInt(process.env.RUNNER_INTERVAL_SECONDS, 60),
+    runnerCandleAlign: asBool(process.env.RUNNER_CANDLE_ALIGN, true),
+    runnerMaxBackoffSeconds: asInt(process.env.RUNNER_MAX_BACKOFF_SECONDS, 900),
+    healthServerEnabled: asBool(process.env.HEALTH_SERVER_ENABLED, false),
+    healthServerPort: asInt(process.env.HEALTH_SERVER_PORT, 8787),
+    simFeeBps: asFloat(process.env.SIM_FEE_BPS, 0),
+    simSlippageBps: asFloat(process.env.SIM_SLIPPAGE_BPS, 0),
+    simPartialFillEnabled: asBool(process.env.SIM_PARTIAL_FILL_ENABLED, false)
   };
 
   cfg.openRouterBaseUrl = asHttpUrl(cfg.openRouterBaseUrl, "OPENROUTER_BASE_URL");
@@ -112,6 +140,21 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
   failIf(cfg.sloP95RunLatencyMs <= 0, "SLO_P95_RUN_LATENCY_MS must be > 0");
   failIf(cfg.sloMaxFallbackRatio < 0 || cfg.sloMaxFallbackRatio > 1, "SLO_MAX_FALLBACK_RATIO must be 0..1");
   failIf(cfg.sloMaxConsecutiveFailures < 1, "SLO_MAX_CONSECUTIVE_FAILURES must be >= 1");
+
+  failIf(cfg.runnerIntervalSeconds < 5, "RUNNER_INTERVAL_SECONDS must be >= 5");
+  failIf(cfg.runnerMaxBackoffSeconds < cfg.runnerIntervalSeconds, "RUNNER_MAX_BACKOFF_SECONDS must be >= RUNNER_INTERVAL_SECONDS");
+  failIf(cfg.obsRetentionDays < 1, "OBS_RETENTION_DAYS must be >= 1");
+  failIf(cfg.healthServerPort < 1 || cfg.healthServerPort > 65535, "HEALTH_SERVER_PORT must be within 1..65535");
+  failIf(cfg.simFeeBps < 0, "SIM_FEE_BPS must be >= 0");
+  failIf(cfg.simSlippageBps < 0, "SIM_SLIPPAGE_BPS must be >= 0");
+
+  if (cfg.obsPersistEnabled) {
+    const resolvedDbPath = path.resolve(cfg.obsSqlitePath);
+    const dbDir = path.dirname(resolvedDbPath);
+    if (!fs.existsSync(dbDir)) {
+      fs.mkdirSync(dbDir, { recursive: true });
+    }
+  }
 
   if (cfg.strictRealMode) {
     failIf(!cfg.theNewsApiKey, "THENEWSAPI_KEY is required when STRICT_REAL_MODE=true");
