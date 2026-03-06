@@ -1,11 +1,14 @@
 import { confirm, input, select } from "@inquirer/prompts";
 import { Command } from "commander";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { BinanceAccountProvider, StaticPortfolioStateProvider } from "./core/account-state";
 import { BinanceFuturesTradingService } from "./core/futures-trading";
 import { BinanceSpotTradingService } from "./core/spot-trading";
 import { InMemoryTelemetrySink, SqliteTelemetrySink } from "./core/telemetry";
-import { loadRuntimeConfig, type RuntimeConfig } from "./core/env";
+import { ENV_TEMPLATE, loadRuntimeConfigWithMeta, type RuntimeConfig } from "./core/env";
 import { runApp, type AppRunOverrides } from "./main";
 import { runOpsTail } from "./scripts/ops-tail";
 import { runDeterministicChecks } from "./scripts/validate";
@@ -38,6 +41,12 @@ interface RunnerOptions extends CommonRunOptions {
 interface HealthOptions {
   check?: "healthz" | "readyz";
   port?: number;
+}
+
+interface EnvInitOptions {
+  scope?: "global" | "local";
+  path?: string;
+  force?: boolean;
 }
 
 interface TailOptions {
@@ -192,7 +201,8 @@ const normalizeGlobalOptions = (command: Command): CliGlobalOptions => {
   return {
     json: Boolean(raw.json),
     output: parseOutput(typeof raw.output === "string" ? raw.output : undefined),
-    mode: parseMode(typeof raw.mode === "string" ? raw.mode : undefined)
+    mode: parseMode(typeof raw.mode === "string" ? raw.mode : undefined),
+    envFile: typeof raw.envFile === "string" ? raw.envFile : undefined
   };
 };
 
@@ -271,14 +281,18 @@ const resolveRuntimeConfig = (
   global: CliGlobalOptions,
   overrides: Partial<AppRunOverrides>
 ): ResolvedRuntime => {
-  const runtime = loadRuntimeConfig();
+  const { runtime, meta } = loadRuntimeConfigWithMeta({ envFile: global.envFile });
+  const envOrDefault = (name: string): "env" | "default" =>
+    meta.keySource[name] && meta.keySource[name] !== "default" ? "env" : "default";
+  const modeFromEnv = parseMode(meta.resolvedValues.PIPELINE_MODE) ?? "backtest";
+  const outputFromEnv = parseOutput(meta.resolvedValues.OUTPUT_FORMAT) ?? "pretty";
 
   const effective: Record<string, JSONValue> = {
-    mode: global.mode ?? (process.env.PIPELINE_MODE as PipelineMode | undefined) ?? "backtest",
-    output: global.output ?? (process.env.OUTPUT_FORMAT as OutputFormat | undefined) ?? "pretty",
-    show_telemetry:
-      overrides.showTelemetry ??
-      ["1", "true", "yes", "on"].includes((process.env.SHOW_TELEMETRY ?? "false").toLowerCase()),
+    mode: global.mode ?? modeFromEnv,
+    output: global.output ?? outputFromEnv,
+    env_file: global.envFile ?? "",
+    env_files_loaded: meta.loadedFiles,
+    show_telemetry: overrides.showTelemetry ?? runtime.showTelemetry,
     runner_enabled: overrides.runnerEnabled ?? runtime.runnerEnabled,
     runner_interval_seconds: overrides.runnerIntervalSeconds ?? runtime.runnerIntervalSeconds,
     runner_candle_align: overrides.runnerCandleAlign ?? runtime.runnerCandleAlign,
@@ -307,67 +321,59 @@ const resolveRuntimeConfig = (
   };
 
   const source: Record<string, "flag" | "env" | "default"> = {
-    mode: global.mode ? "flag" : process.env.PIPELINE_MODE ? "env" : "default",
-    output: global.output ? "flag" : process.env.OUTPUT_FORMAT ? "env" : "default",
+    mode: global.mode ? "flag" : envOrDefault("PIPELINE_MODE"),
+    output: global.output ? "flag" : envOrDefault("OUTPUT_FORMAT"),
+    env_file: global.envFile ? "flag" : "default",
+    env_files_loaded: meta.loadedFiles.length > 0 ? "env" : "default",
     show_telemetry:
       overrides.showTelemetry !== undefined
         ? "flag"
-        : process.env.SHOW_TELEMETRY
-          ? "env"
-          : "default",
+        : envOrDefault("SHOW_TELEMETRY"),
     runner_enabled:
       overrides.runnerEnabled !== undefined
         ? "flag"
-        : process.env.RUNNER_ENABLED
-          ? "env"
-          : "default",
+        : envOrDefault("RUNNER_ENABLED"),
     runner_interval_seconds:
       overrides.runnerIntervalSeconds !== undefined
         ? "flag"
-        : process.env.RUNNER_INTERVAL_SECONDS
-          ? "env"
-          : "default",
+        : envOrDefault("RUNNER_INTERVAL_SECONDS"),
     runner_candle_align:
       overrides.runnerCandleAlign !== undefined
         ? "flag"
-        : process.env.RUNNER_CANDLE_ALIGN
-          ? "env"
-          : "default",
+        : envOrDefault("RUNNER_CANDLE_ALIGN"),
     runner_max_backoff_seconds:
       overrides.runnerMaxBackoffSeconds !== undefined
         ? "flag"
-        : process.env.RUNNER_MAX_BACKOFF_SECONDS
-          ? "env"
-          : "default",
-    binance_account_enabled: process.env.BINANCE_ACCOUNT_ENABLED ? "env" : "default",
-    strict_real_mode: process.env.STRICT_REAL_MODE ? "env" : "default",
-    obs_persist_enabled: process.env.OBS_PERSIST_ENABLED ? "env" : "default",
-    obs_sqlite_path: process.env.OBS_SQLITE_PATH ? "env" : "default",
-    binance_spot_enabled: process.env.BINANCE_SPOT_ENABLED ? "env" : "default",
-    binance_spot_symbol_whitelist: process.env.BINANCE_SPOT_SYMBOL_WHITELIST ? "env" : "default",
-    binance_spot_default_tif: process.env.BINANCE_SPOT_DEFAULT_TIF ? "env" : "default",
-    binance_spot_recv_window: process.env.BINANCE_SPOT_RECV_WINDOW ? "env" : "default",
-    binance_futures_enabled: process.env.BINANCE_FUTURES_ENABLED ? "env" : "default",
-    binance_futures_scope_default: process.env.BINANCE_FUTURES_SCOPE_DEFAULT ? "env" : "default",
-    binance_futures_symbol_whitelist: process.env.BINANCE_FUTURES_SYMBOL_WHITELIST ? "env" : "default",
-    binance_futures_default_tif: process.env.BINANCE_FUTURES_DEFAULT_TIF ? "env" : "default",
-    binance_futures_recv_window: process.env.BINANCE_FUTURES_RECV_WINDOW ? "env" : "default",
-    binance_futures_default_leverage: process.env.BINANCE_FUTURES_DEFAULT_LEVERAGE ? "env" : "default",
-    binance_futures_margin_mode: process.env.BINANCE_FUTURES_MARGIN_MODE ? "env" : "default",
-    binance_futures_position_mode: process.env.BINANCE_FUTURES_POSITION_MODE ? "env" : "default",
-    openrouter_model: process.env.OPENROUTER_MODEL ? "env" : "default",
-    binance_api_key: process.env.BINANCE_API_KEY ? "env" : "default",
-    binance_api_secret: process.env.BINANCE_API_SECRET ? "env" : "default",
-    openrouter_api_key: process.env.OPENROUTER_API_KEY ? "env" : "default",
-    thenewsapi_key: process.env.THENEWSAPI_KEY ? "env" : "default"
+        : envOrDefault("RUNNER_MAX_BACKOFF_SECONDS"),
+    binance_account_enabled: envOrDefault("BINANCE_ACCOUNT_ENABLED"),
+    strict_real_mode: envOrDefault("STRICT_REAL_MODE"),
+    obs_persist_enabled: envOrDefault("OBS_PERSIST_ENABLED"),
+    obs_sqlite_path: envOrDefault("OBS_SQLITE_PATH"),
+    binance_spot_enabled: envOrDefault("BINANCE_SPOT_ENABLED"),
+    binance_spot_symbol_whitelist: envOrDefault("BINANCE_SPOT_SYMBOL_WHITELIST"),
+    binance_spot_default_tif: envOrDefault("BINANCE_SPOT_DEFAULT_TIF"),
+    binance_spot_recv_window: envOrDefault("BINANCE_SPOT_RECV_WINDOW"),
+    binance_futures_enabled: envOrDefault("BINANCE_FUTURES_ENABLED"),
+    binance_futures_scope_default: envOrDefault("BINANCE_FUTURES_SCOPE_DEFAULT"),
+    binance_futures_symbol_whitelist: envOrDefault("BINANCE_FUTURES_SYMBOL_WHITELIST"),
+    binance_futures_default_tif: envOrDefault("BINANCE_FUTURES_DEFAULT_TIF"),
+    binance_futures_recv_window: envOrDefault("BINANCE_FUTURES_RECV_WINDOW"),
+    binance_futures_default_leverage: envOrDefault("BINANCE_FUTURES_DEFAULT_LEVERAGE"),
+    binance_futures_margin_mode: envOrDefault("BINANCE_FUTURES_MARGIN_MODE"),
+    binance_futures_position_mode: envOrDefault("BINANCE_FUTURES_POSITION_MODE"),
+    openrouter_model: envOrDefault("OPENROUTER_MODEL"),
+    binance_api_key: envOrDefault("BINANCE_API_KEY"),
+    binance_api_secret: envOrDefault("BINANCE_API_SECRET"),
+    openrouter_api_key: envOrDefault("OPENROUTER_API_KEY"),
+    thenewsapi_key: envOrDefault("THENEWSAPI_KEY")
   };
 
   return { runtime, view: { effective, source } };
 };
 
-const doHealthCheck = async (options: HealthOptions): Promise<CliCommandResult> => {
+const doHealthCheck = async (options: HealthOptions, fallbackPort: number): Promise<CliCommandResult> => {
   const check = options.check ?? "readyz";
-  const port = options.port ?? Number.parseInt(process.env.HEALTH_SERVER_PORT ?? "8787", 10);
+  const port = options.port ?? fallbackPort;
   const url = `http://127.0.0.1:${port}/${check}`;
 
   try {
@@ -439,6 +445,45 @@ const doDoctor = (runtime: RuntimeConfig, mode: PipelineMode): CliCommandResult 
         health_server_enabled: runtime.healthServerEnabled
       }
     }
+  };
+};
+
+const doEnvInit = (options: EnvInitOptions): CliCommandResult => {
+  const scope = options.scope === "local" ? "local" : "global";
+  const targetPath = options.path
+    ? path.resolve(process.cwd(), options.path)
+    : scope === "local"
+      ? path.resolve(process.cwd(), ".env")
+      : path.resolve(os.homedir(), ".vexis", ".env");
+  const existedBefore = fs.existsSync(targetPath);
+
+  const parentDir = path.dirname(targetPath);
+  if (!fs.existsSync(parentDir)) {
+    fs.mkdirSync(parentDir, { recursive: true });
+  }
+
+  if (fs.existsSync(targetPath) && !options.force) {
+    return {
+      exitCode: 1,
+      message: `env file already exists at ${targetPath}. Use --force to overwrite.`,
+      data: {
+        target: targetPath,
+        scope,
+        overwritten: false
+      }
+    };
+  }
+
+  fs.writeFileSync(targetPath, ENV_TEMPLATE, "utf8");
+
+  return {
+    exitCode: 0,
+    message: `env template written to ${targetPath}`,
+      data: {
+        target: targetPath,
+        scope,
+        overwritten: existedBefore
+      }
   };
 };
 
@@ -838,6 +883,7 @@ const toRunOverrides = (
 ): AppRunOverrides => ({
   mode: global.mode,
   outputFormat: global.output,
+  envFile: global.envFile,
   showTelemetry: options.showTelemetry,
   query: {
     asset: options.asset,
@@ -1306,8 +1352,9 @@ const runInteractive = async (command: Command): Promise<void> => {
             { name: "healthz", value: "healthz" }
           ]
         })) as "healthz" | "readyz";
-        const port = await promptInt("Port", Number.parseInt(process.env.HEALTH_SERVER_PORT ?? "8787", 10));
-        const result = await withLoading("Checking health", async () => doHealthCheck({ check, port }));
+        const { runtime } = resolveRuntimeConfig(global, {});
+        const port = await promptInt("Port", runtime.healthServerPort);
+        const result = await withLoading("Checking health", async () => doHealthCheck({ check, port }, runtime.healthServerPort));
         printResult(result, Boolean(global.json));
         continue;
       }
@@ -1379,6 +1426,7 @@ program
   .option("--json", "JSON output")
   .option("--output <format>", "Output format: pretty|json")
   .option("--mode <mode>", "Pipeline mode: backtest|paper|live-sim")
+  .option("--env-file <path>", "Custom env file path (lower precedence than OS env)")
   .showHelpAfterError();
 
 program.action(async (_: unknown, command: Command) => {
@@ -1430,8 +1478,9 @@ program
   .option("--port <port>", "Health port", (v) => Number.parseInt(v, 10))
   .action(async (options: HealthOptions, command: Command) => {
     const global = normalizeGlobalOptions(command);
+    const { runtime } = resolveRuntimeConfig(global, {});
     const result = await withLoading("Checking health", async () =>
-      doHealthCheck(options),
+      doHealthCheck(options, runtime.healthServerPort),
     );
     printResult(result, Boolean(global.json || global.output === "json"));
     process.exitCode = result.exitCode;
@@ -1490,6 +1539,21 @@ envCommand
     }
   });
 
+envCommand
+  .command("init")
+  .description("Create an env template for local or global runtime")
+  .option("--scope <scope>", "global|local", "global")
+  .option("--path <path>", "Write env template to custom path")
+  .option("--force", "Overwrite existing env file")
+  .action(async (options: EnvInitOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    const result = await withLoading("Creating env template", async () =>
+      Promise.resolve(doEnvInit(options)),
+    );
+    printResult(result, Boolean(global.json || global.output === "json"));
+    process.exitCode = result.exitCode;
+  });
+
 const opsCommand = program.command("ops").description("Operational commands");
 opsCommand
   .command("tail")
@@ -1500,9 +1564,11 @@ opsCommand
   .option("--severity <severity>")
   .option("--limit <limit>", "Limit", (v) => Number.parseInt(v, 10))
   .option("--json", "Output JSON")
-  .action(async (options: TailOptions) => {
+  .action(async (options: TailOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    const { runtime } = resolveRuntimeConfig(global, {});
     await withLoading("Fetching ops tail", async () =>
-      runOpsTail(tailOptionsToArgv(options)),
+      runOpsTail(tailOptionsToArgv(options), runtime),
     );
   });
 

@@ -426,6 +426,7 @@ export interface CliGlobalOptions {
   json?: boolean;
   output?: OutputFormat;
   mode?: PipelineMode;
+  envFile?: string;
 }
 
 export interface CliCommandResult {

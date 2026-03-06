@@ -521,13 +521,13 @@ export class RealCryptoDataProvider implements MarketDataProvider {
 
   public async getSnapshot(query: MarketDataQuery): Promise<MarketSnapshot> {
     const started = this.nowMs();
+    if (this.strictRealMode) {
+      this.ensureRequiredKeys();
+    }
+
     if (!this.marketsLoaded) {
       await this.exchange.loadMarkets();
       this.marketsLoaded = true;
-    }
-
-    if (this.strictRealMode) {
-      this.ensureRequiredKeys();
     }
 
     const market = await this.fetchMarket(query);

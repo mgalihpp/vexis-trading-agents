@@ -44,6 +44,13 @@ npm install
 cp .env.example .env
 ```
 
+Global install:
+
+```bash
+npm i -g vexis-trading-agents
+vexis env init --scope global
+```
+
 ## Build & Validate
 
 ```bash
@@ -78,6 +85,7 @@ vexis ops tail
 vexis health
 vexis account check
 vexis doctor
+vexis env init
 vexis env check
 vexis validate
 ```
@@ -115,6 +123,13 @@ vexis futures quote --scope usdm --symbol BTC/USDT:USDT [--depth 5]
 
 Use `--json` on commands for machine-readable output.
 
+Use custom env file per command:
+
+```bash
+vexis --env-file ./secrets/prod.env env check
+vexis --env-file ./secrets/prod.env run --mode paper
+```
+
 ## Interactive UX
 
 `vexis interactive` provides menu-driven workflows:
@@ -132,6 +147,23 @@ UX behavior:
 - back navigation on each submenu
 
 ## Configuration
+
+Env precedence (highest to lowest):
+
+1. CLI flag overrides (for example `--env-file`)
+2. OS/session env (`process.env`)
+3. File from `--env-file`
+4. Global env file `~/.vexis/.env`
+5. Local env file `./.env`
+6. Internal defaults
+
+Bootstrap env file:
+
+```bash
+vexis env init --scope global
+vexis env init --scope local
+vexis env init --path ./configs/dev.env
+```
 
 ### Runtime mode
 

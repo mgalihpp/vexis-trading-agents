@@ -16,6 +16,7 @@ import {
 } from "../agents";
 import { defaultRiskRules } from "../config/risk";
 import { BinanceAccountProvider } from "../core/account-state";
+import { loadRuntimeConfigWithMeta } from "../core/env";
 import { InMemoryEventStore, SqliteEventStorePersistence } from "../core/event-store";
 import { BinanceFuturesTradingService } from "../core/futures-trading";
 import { HealthMonitor } from "../core/health";
@@ -1028,6 +1029,50 @@ export const runDeterministicChecks = async (): Promise<void> => {
   assert.ok(runTrace.metrics.length > 0, "SQLite run trace should include metrics");
   const purged = sqliteTelemetry.purgeOlderThan("2026-03-06T00:00:00.000Z");
   assert.ok(purged.telemetryMetricsDeleted >= 1, "Retention purge should delete old telemetry metrics");
+
+  const envDir = fs.mkdtempSync(path.join(os.tmpdir(), "vexis-env-"));
+  const envLocal = path.join(envDir, ".env");
+  const fakeHome = path.join(envDir, "home");
+  const envGlobalDir = path.join(fakeHome, ".vexis");
+  const envGlobal = path.join(envGlobalDir, ".env");
+  const envExplicit = path.join(envDir, "custom.env");
+  fs.mkdirSync(envGlobalDir, { recursive: true });
+  fs.writeFileSync(envLocal, "OPENROUTER_MODEL=local-model\nSTRICT_REAL_MODE=false\n", "utf8");
+  fs.writeFileSync(envGlobal, "OPENROUTER_MODEL=global-model\nSTRICT_REAL_MODE=false\n", "utf8");
+  fs.writeFileSync(envExplicit, "OPENROUTER_MODEL=explicit-model\nSTRICT_REAL_MODE=false\n", "utf8");
+
+  const envResolved = loadRuntimeConfigWithMeta({
+    cwd: envDir,
+    homeDir: fakeHome,
+    envFile: envExplicit,
+    processEnv: {
+      STRICT_REAL_MODE: "false"
+    }
+  });
+  assert.equal(envResolved.runtime.openRouterModel, "explicit-model", "--env-file should override global/local env values");
+
+  const envResolvedProcessWins = loadRuntimeConfigWithMeta({
+    cwd: envDir,
+    homeDir: fakeHome,
+    envFile: envExplicit,
+    processEnv: {
+      OPENROUTER_MODEL: "process-model",
+      STRICT_REAL_MODE: "false"
+    }
+  });
+  assert.equal(envResolvedProcessWins.runtime.openRouterModel, "process-model", "process env should override env files");
+  assert.equal(envResolvedProcessWins.meta.keySource.OPENROUTER_MODEL, "process", "env source should mark process env precedence");
+
+  const envDefaultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "vexis-env-defaults-"));
+  const envDefaults = loadRuntimeConfigWithMeta({
+    cwd: envDefaultsDir,
+    homeDir: path.join(envDefaultsDir, "home"),
+    processEnv: {
+      STRICT_REAL_MODE: "false"
+    }
+  });
+  assert.equal(envDefaults.runtime.openRouterModel, "openai/gpt-4o-mini", "internal default should apply when env value is missing");
+  assert.equal(envDefaults.meta.keySource.OPENROUTER_MODEL, "default", "env source should mark default when no env value exists");
 
   const exchStore = new InMemoryEventStore();
   const realisticExchange = new SimulatedExchange(exchStore, {

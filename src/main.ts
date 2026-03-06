@@ -13,7 +13,7 @@ import {
 } from "./agents";
 import { defaultRiskRules } from "./config/risk";
 import { BinanceAccountProvider, StaticPortfolioStateProvider } from "./core/account-state";
-import { loadRuntimeConfig } from "./core/env";
+import { loadRuntimeConfigWithMeta } from "./core/env";
 import { InMemoryEventStore, SqliteEventStorePersistence } from "./core/event-store";
 import { HealthServer } from "./core/health-server";
 import { HealthMonitor } from "./core/health";
@@ -36,6 +36,7 @@ import { printRunReport } from "./utils/report";
 export interface AppRunOverrides {
   mode?: PipelineMode;
   outputFormat?: OutputFormat;
+  envFile?: string;
   showTelemetry?: boolean;
   telemetryConsoleMirror?: boolean;
   runnerEnabled?: boolean;
@@ -45,26 +46,28 @@ export interface AppRunOverrides {
   query?: Partial<MarketDataQuery>;
 }
 
-const modeFromEnv = (): PipelineMode =>
-  (process.env.PIPELINE_MODE as PipelineMode | undefined) ?? "backtest";
+const parseMode = (value: string | undefined): PipelineMode | undefined => {
+  if (value === "backtest" || value === "paper" || value === "live-sim") {
+    return value;
+  }
+  return undefined;
+};
 
-const outputFormatFromEnv = (): OutputFormat =>
-  (process.env.OUTPUT_FORMAT as OutputFormat | undefined) ?? "pretty";
-
-const boolEnv = (name: string, fallback: boolean): boolean => {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+const parseOutput = (value: string | undefined): OutputFormat | undefined => {
+  if (value === "pretty" || value === "json") {
+    return value;
+  }
+  return undefined;
 };
 
 export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => {
-  const runtime = loadRuntimeConfig();
+  const { runtime, meta } = loadRuntimeConfigWithMeta({ envFile: overrides.envFile });
 
-  const mode = overrides.mode ?? modeFromEnv();
-  const outputFormat = overrides.outputFormat ?? outputFormatFromEnv();
-  const showTelemetry = overrides.showTelemetry ?? boolEnv("SHOW_TELEMETRY", false);
+  const mode = overrides.mode ?? parseMode(meta.resolvedValues.PIPELINE_MODE) ?? "backtest";
+  const outputFormat = overrides.outputFormat ?? parseOutput(meta.resolvedValues.OUTPUT_FORMAT) ?? "pretty";
+  const showTelemetry = overrides.showTelemetry ?? runtime.showTelemetry;
   const telemetryConsoleMirror =
-    overrides.telemetryConsoleMirror ?? boolEnv("TELEMETRY_CONSOLE", false);
+    overrides.telemetryConsoleMirror ?? runtime.telemetryConsoleMirror;
   const runnerEnabled = overrides.runnerEnabled ?? runtime.runnerEnabled;
   const runnerIntervalSeconds =
     overrides.runnerIntervalSeconds ?? runtime.runnerIntervalSeconds;
