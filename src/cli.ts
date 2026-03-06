@@ -2,6 +2,7 @@ import { confirm, input, select } from "@inquirer/prompts";
 import { Command } from "commander";
 import { randomUUID } from "node:crypto";
 import { BinanceAccountProvider, StaticPortfolioStateProvider } from "./core/account-state";
+import { BinanceFuturesTradingService } from "./core/futures-trading";
 import { BinanceSpotTradingService } from "./core/spot-trading";
 import { InMemoryTelemetrySink, SqliteTelemetrySink } from "./core/telemetry";
 import { loadRuntimeConfig, type RuntimeConfig } from "./core/env";
@@ -12,6 +13,8 @@ import type {
   CliCommandResult,
   CliGlobalOptions,
   EffectiveConfigView,
+  FuturesScope,
+  FuturesTimeInForce,
   JSONValue,
   OutputFormat,
   PipelineMode,
@@ -76,6 +79,51 @@ interface SpotTradesOptions {
 }
 
 interface SpotQuoteOptions {
+  symbol: string;
+  depth?: number;
+}
+
+interface FuturesPlaceOptions {
+  scope?: FuturesScope;
+  symbol: string;
+  type?: "market" | "limit";
+  amount?: number;
+  price?: number;
+  tif?: FuturesTimeInForce;
+  reduceOnly?: boolean;
+}
+
+interface FuturesOrderGetOptions {
+  scope?: FuturesScope;
+  symbol: string;
+  orderId: string;
+}
+
+interface FuturesOrdersListOptions {
+  scope?: FuturesScope;
+  symbol?: string;
+  limit?: number;
+}
+
+interface FuturesOrderCancelOptions {
+  scope?: FuturesScope;
+  symbol: string;
+  orderId: string;
+}
+
+interface FuturesPositionsOptions {
+  scope?: FuturesScope;
+  symbol?: string;
+}
+
+interface FuturesTradesOptions {
+  scope?: FuturesScope;
+  symbol: string;
+  limit?: number;
+}
+
+interface FuturesQuoteOptions {
+  scope?: FuturesScope;
   symbol: string;
   depth?: number;
 }
@@ -165,6 +213,12 @@ const makeSpotContext = (mode: PipelineMode): { runId: string; traceId: string; 
   mode
 });
 
+const makeFuturesContext = (mode: PipelineMode): { runId: string; traceId: string; mode: PipelineMode } => ({
+  runId: `futures-op-${Date.now()}`,
+  traceId: randomUUID(),
+  mode
+});
+
 const getSpotService = (runtime: RuntimeConfig, mode: PipelineMode): BinanceSpotTradingService => {
   const telemetrySink = runtime.obsPersistEnabled
     ? new SqliteTelemetrySink(runtime.obsSqlitePath)
@@ -177,6 +231,35 @@ const getSpotService = (runtime: RuntimeConfig, mode: PipelineMode): BinanceSpot
     defaultTif: runtime.binanceSpotDefaultTif,
     recvWindow: runtime.binanceSpotRecvWindow,
     timeoutMs: runtime.nodeTimeoutMs,
+    mode,
+    telemetrySink
+  });
+};
+
+const normalizeFuturesScope = (runtime: RuntimeConfig, scope?: FuturesScope): FuturesScope =>
+  scope ?? runtime.binanceFuturesScopeDefault;
+
+const normalizeFuturesSymbol = (symbol: string): string => {
+  const raw = symbol.trim().toUpperCase();
+  return raw.includes(":") ? raw : `${raw}:USDT`;
+};
+
+const getFuturesService = (runtime: RuntimeConfig, mode: PipelineMode): BinanceFuturesTradingService => {
+  const telemetrySink = runtime.obsPersistEnabled
+    ? new SqliteTelemetrySink(runtime.obsSqlitePath)
+    : new InMemoryTelemetrySink(false);
+  return BinanceFuturesTradingService.getInstance({
+    enabled: runtime.binanceFuturesEnabled,
+    apiKey: runtime.binanceApiKey,
+    apiSecret: runtime.binanceApiSecret,
+    symbolWhitelist: runtime.binanceFuturesSymbolWhitelist,
+    defaultScope: runtime.binanceFuturesScopeDefault,
+    defaultTif: runtime.binanceFuturesDefaultTif,
+    recvWindow: runtime.binanceFuturesRecvWindow,
+    timeoutMs: runtime.nodeTimeoutMs,
+    defaultLeverage: runtime.binanceFuturesDefaultLeverage,
+    marginMode: runtime.binanceFuturesMarginMode,
+    positionMode: runtime.binanceFuturesPositionMode,
     mode,
     telemetrySink
   });
@@ -208,6 +291,14 @@ const resolveRuntimeConfig = (
     binance_spot_symbol_whitelist: runtime.binanceSpotSymbolWhitelist,
     binance_spot_default_tif: runtime.binanceSpotDefaultTif,
     binance_spot_recv_window: runtime.binanceSpotRecvWindow,
+    binance_futures_enabled: runtime.binanceFuturesEnabled,
+    binance_futures_scope_default: runtime.binanceFuturesScopeDefault,
+    binance_futures_symbol_whitelist: runtime.binanceFuturesSymbolWhitelist,
+    binance_futures_default_tif: runtime.binanceFuturesDefaultTif,
+    binance_futures_recv_window: runtime.binanceFuturesRecvWindow,
+    binance_futures_default_leverage: runtime.binanceFuturesDefaultLeverage,
+    binance_futures_margin_mode: runtime.binanceFuturesMarginMode,
+    binance_futures_position_mode: runtime.binanceFuturesPositionMode,
     openrouter_model: runtime.openRouterModel,
     binance_api_key: maskSecret(runtime.binanceApiKey),
     binance_api_secret: maskSecret(runtime.binanceApiSecret),
@@ -256,6 +347,14 @@ const resolveRuntimeConfig = (
     binance_spot_symbol_whitelist: process.env.BINANCE_SPOT_SYMBOL_WHITELIST ? "env" : "default",
     binance_spot_default_tif: process.env.BINANCE_SPOT_DEFAULT_TIF ? "env" : "default",
     binance_spot_recv_window: process.env.BINANCE_SPOT_RECV_WINDOW ? "env" : "default",
+    binance_futures_enabled: process.env.BINANCE_FUTURES_ENABLED ? "env" : "default",
+    binance_futures_scope_default: process.env.BINANCE_FUTURES_SCOPE_DEFAULT ? "env" : "default",
+    binance_futures_symbol_whitelist: process.env.BINANCE_FUTURES_SYMBOL_WHITELIST ? "env" : "default",
+    binance_futures_default_tif: process.env.BINANCE_FUTURES_DEFAULT_TIF ? "env" : "default",
+    binance_futures_recv_window: process.env.BINANCE_FUTURES_RECV_WINDOW ? "env" : "default",
+    binance_futures_default_leverage: process.env.BINANCE_FUTURES_DEFAULT_LEVERAGE ? "env" : "default",
+    binance_futures_margin_mode: process.env.BINANCE_FUTURES_MARGIN_MODE ? "env" : "default",
+    binance_futures_position_mode: process.env.BINANCE_FUTURES_POSITION_MODE ? "env" : "default",
     openrouter_model: process.env.OPENROUTER_MODEL ? "env" : "default",
     binance_api_key: process.env.BINANCE_API_KEY ? "env" : "default",
     binance_api_secret: process.env.BINANCE_API_SECRET ? "env" : "default",
@@ -309,6 +408,14 @@ const doDoctor = (runtime: RuntimeConfig, mode: PipelineMode): CliCommandResult 
       errors.push("BINANCE_SPOT_SYMBOL_WHITELIST must contain at least one symbol.");
     }
   }
+  if (runtime.binanceFuturesEnabled) {
+    if (!runtime.binanceApiKey || !runtime.binanceApiSecret) {
+      errors.push("BINANCE_API_KEY/BINANCE_API_SECRET required when BINANCE_FUTURES_ENABLED=true.");
+    }
+    if (runtime.binanceFuturesSymbolWhitelist.length === 0) {
+      errors.push("BINANCE_FUTURES_SYMBOL_WHITELIST must contain at least one symbol.");
+    }
+  }
   if (runtime.obsPersistEnabled && !runtime.obsSqlitePath) {
     errors.push("OBS_SQLITE_PATH is required when OBS_PERSIST_ENABLED=true.");
   }
@@ -327,6 +434,7 @@ const doDoctor = (runtime: RuntimeConfig, mode: PipelineMode): CliCommandResult 
         strict_real_mode: runtime.strictRealMode,
         binance_account_enabled: runtime.binanceAccountEnabled,
         binance_spot_enabled: runtime.binanceSpotEnabled,
+        binance_futures_enabled: runtime.binanceFuturesEnabled,
         obs_persist_enabled: runtime.obsPersistEnabled,
         health_server_enabled: runtime.healthServerEnabled
       }
@@ -525,6 +633,193 @@ const doSpotQuote = async (
   return { exitCode: 0, message: "spot quote fetched", data: asJsonValue(quote) };
 };
 
+const parseFuturesType = (value?: string): "market" | "limit" =>
+  value?.toLowerCase() === "limit" ? "limit" : "market";
+
+const doFuturesBuy = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: FuturesPlaceOptions
+): Promise<CliCommandResult> => {
+  const service = getFuturesService(runtime, mode);
+  const scope = normalizeFuturesScope(runtime, options.scope);
+  const order = await service.placeOrder(
+    {
+      scope,
+      symbol: normalizeFuturesSymbol(options.symbol),
+      side: "buy",
+      type: parseFuturesType(options.type),
+      amount: Number(options.amount ?? 0),
+      price: options.price,
+      tif: options.tif ?? runtime.binanceFuturesDefaultTif,
+      reduceOnly: options.reduceOnly
+    },
+    makeFuturesContext(mode)
+  );
+  return { exitCode: 0, message: "futures buy success", data: asJsonValue(order) };
+};
+
+const doFuturesSell = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: FuturesPlaceOptions
+): Promise<CliCommandResult> => {
+  const service = getFuturesService(runtime, mode);
+  const scope = normalizeFuturesScope(runtime, options.scope);
+  const order = await service.placeOrder(
+    {
+      scope,
+      symbol: normalizeFuturesSymbol(options.symbol),
+      side: "sell",
+      type: parseFuturesType(options.type),
+      amount: Number(options.amount ?? 0),
+      price: options.price,
+      tif: options.tif ?? runtime.binanceFuturesDefaultTif,
+      reduceOnly: options.reduceOnly
+    },
+    makeFuturesContext(mode)
+  );
+  return { exitCode: 0, message: "futures sell success", data: asJsonValue(order) };
+};
+
+const doFuturesOrderGet = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: FuturesOrderGetOptions
+): Promise<CliCommandResult> => {
+  const service = getFuturesService(runtime, mode);
+  const scope = normalizeFuturesScope(runtime, options.scope);
+  const order = await service.fetchOrder(
+    scope,
+    options.orderId,
+    normalizeFuturesSymbol(options.symbol),
+    makeFuturesContext(mode)
+  );
+  return { exitCode: 0, message: "futures order fetched", data: asJsonValue(order) };
+};
+
+const doFuturesOrdersOpen = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: FuturesOrdersListOptions
+): Promise<CliCommandResult> => {
+  const service = getFuturesService(runtime, mode);
+  const scope = normalizeFuturesScope(runtime, options.scope);
+  const rows = await service.fetchOpenOrders(
+    scope,
+    makeFuturesContext(mode),
+    options.symbol ? normalizeFuturesSymbol(options.symbol) : undefined,
+    options.limit
+  );
+  return { exitCode: 0, message: "futures open orders fetched", data: asJsonValue(rows) };
+};
+
+const doFuturesOrdersClosed = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: FuturesOrdersListOptions
+): Promise<CliCommandResult> => {
+  const service = getFuturesService(runtime, mode);
+  const scope = normalizeFuturesScope(runtime, options.scope);
+  const rows = await service.fetchClosedOrders(
+    scope,
+    makeFuturesContext(mode),
+    options.symbol ? normalizeFuturesSymbol(options.symbol) : undefined,
+    options.limit
+  );
+  return { exitCode: 0, message: "futures closed orders fetched", data: asJsonValue(rows) };
+};
+
+const doFuturesOrderCancel = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: FuturesOrderCancelOptions
+): Promise<CliCommandResult> => {
+  const service = getFuturesService(runtime, mode);
+  const scope = normalizeFuturesScope(runtime, options.scope);
+  const row = await service.cancelOrder(
+    scope,
+    options.orderId,
+    normalizeFuturesSymbol(options.symbol),
+    makeFuturesContext(mode)
+  );
+  return { exitCode: 0, message: "futures order canceled", data: asJsonValue(row) };
+};
+
+const doFuturesOrderCancelAll = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  scope?: FuturesScope,
+  symbol?: string
+): Promise<CliCommandResult> => {
+  const service = getFuturesService(runtime, mode);
+  const resolvedScope = normalizeFuturesScope(runtime, scope);
+  const rows = await service.cancelAllOrders(
+    resolvedScope,
+    makeFuturesContext(mode),
+    symbol ? normalizeFuturesSymbol(symbol) : undefined
+  );
+  return { exitCode: 0, message: "futures cancel-all completed", data: asJsonValue(rows) };
+};
+
+const doFuturesBalance = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  scope?: FuturesScope
+): Promise<CliCommandResult> => {
+  const service = getFuturesService(runtime, mode);
+  const resolvedScope = normalizeFuturesScope(runtime, scope);
+  const snapshot = await service.fetchBalanceSnapshot(resolvedScope, makeFuturesContext(mode));
+  return { exitCode: 0, message: "futures balance fetched", data: asJsonValue(snapshot) };
+};
+
+const doFuturesPositions = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: FuturesPositionsOptions
+): Promise<CliCommandResult> => {
+  const service = getFuturesService(runtime, mode);
+  const scope = normalizeFuturesScope(runtime, options.scope);
+  const rows = await service.fetchPositions(
+    scope,
+    makeFuturesContext(mode),
+    options.symbol ? normalizeFuturesSymbol(options.symbol) : undefined
+  );
+  return { exitCode: 0, message: "futures positions fetched", data: asJsonValue(rows) };
+};
+
+const doFuturesTrades = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: FuturesTradesOptions
+): Promise<CliCommandResult> => {
+  const service = getFuturesService(runtime, mode);
+  const scope = normalizeFuturesScope(runtime, options.scope);
+  const rows = await service.fetchMyTrades(
+    scope,
+    normalizeFuturesSymbol(options.symbol),
+    makeFuturesContext(mode),
+    options.limit
+  );
+  return { exitCode: 0, message: "futures trades fetched", data: asJsonValue(rows) };
+};
+
+const doFuturesQuote = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: FuturesQuoteOptions
+): Promise<CliCommandResult> => {
+  const service = getFuturesService(runtime, mode);
+  const scope = normalizeFuturesScope(runtime, options.scope);
+  const row = await service.fetchQuote(
+    scope,
+    normalizeFuturesSymbol(options.symbol),
+    makeFuturesContext(mode),
+    options.depth
+  );
+  return { exitCode: 0, message: "futures quote fetched", data: asJsonValue(row) };
+};
+
 const printResult = (result: CliCommandResult, asJson: boolean): void => {
   if (asJson) {
     console.log(JSON.stringify(result, null, 2));
@@ -587,6 +882,14 @@ const promptSymbol = async (fallback = "SOL/USDT"): Promise<string> => {
     const symbol = (await input({ message: "Symbol", default: fallback })).trim().toUpperCase();
     if (symbol.includes("/")) return symbol;
     console.log("Symbol format must be BASE/QUOTE (example: SOL/USDT).");
+  }
+};
+
+const promptFuturesSymbol = async (fallback = "BTC/USDT:USDT"): Promise<string> => {
+  while (true) {
+    const symbol = (await input({ message: "Futures symbol", default: fallback })).trim().toUpperCase();
+    if (symbol.includes("/") && symbol.includes(":")) return symbol;
+    console.log("Futures symbol format must be BASE/QUOTE:SETTLE (example: BTC/USDT:USDT).");
   }
 };
 
@@ -722,6 +1025,157 @@ const runSpotInteractive = async (
   }
 };
 
+const promptFuturesScope = async (fallback: FuturesScope): Promise<FuturesScope> =>
+  (await select({
+    message: "Futures scope",
+    choices: [
+      { name: "USD-M", value: "usdm" },
+      { name: "COIN-M", value: "coinm" }
+    ],
+    default: fallback
+  })) as FuturesScope;
+
+const runFuturesInteractive = async (
+  global: CliGlobalOptions,
+  runtime: RuntimeConfig,
+  mode: PipelineMode
+): Promise<void> => {
+  let back = false;
+  while (!back) {
+    const choice = await select({
+      message: "Futures Desk",
+      choices: [
+        { name: "Buy", value: "buy" },
+        { name: "Sell", value: "sell" },
+        { name: "Order Get", value: "order-get" },
+        { name: "Order Cancel", value: "order-cancel" },
+        { name: "Order Cancel All", value: "order-cancel-all" },
+        { name: "Orders Open", value: "orders-open" },
+        { name: "Orders Closed", value: "orders-closed" },
+        { name: "Balance", value: "balance" },
+        { name: "Positions", value: "positions" },
+        { name: "Trades", value: "trades" },
+        { name: "Quote", value: "quote" },
+        { name: "Back", value: "back" }
+      ]
+    });
+
+    if (choice === "back") {
+      back = true;
+      continue;
+    }
+
+    try {
+      const scope = await promptFuturesScope(runtime.binanceFuturesScopeDefault);
+
+      if (choice === "buy" || choice === "sell") {
+        const symbol = await promptFuturesSymbol("BTC/USDT:USDT");
+        const type = (await select({
+          message: "Order type",
+          choices: [
+            { name: "Market", value: "market" },
+            { name: "Limit", value: "limit" }
+          ]
+        })) as "market" | "limit";
+        const amount = await promptFloat("Amount (contracts/base)", 0.001);
+        const price = type === "limit" ? await promptFloat("Limit price", 100000) : undefined;
+        const reduceOnly = await confirm({ message: "Reduce-only?", default: false });
+        const options: FuturesPlaceOptions = { scope, symbol, type, amount, price, reduceOnly };
+        const result = await withLoading(
+          choice === "buy" ? "Placing futures buy" : "Placing futures sell",
+          async () => choice === "buy" ? doFuturesBuy(runtime, mode, options) : doFuturesSell(runtime, mode, options)
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "order-get") {
+        const symbol = await promptFuturesSymbol("BTC/USDT:USDT");
+        const orderId = await input({ message: "Order ID" });
+        const result = await withLoading("Fetching futures order", async () =>
+          doFuturesOrderGet(runtime, mode, { scope, symbol, orderId: orderId.trim() })
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "order-cancel") {
+        const symbol = await promptFuturesSymbol("BTC/USDT:USDT");
+        const orderId = await input({ message: "Order ID" });
+        const result = await withLoading("Canceling futures order", async () =>
+          doFuturesOrderCancel(runtime, mode, { scope, symbol, orderId: orderId.trim() })
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "order-cancel-all") {
+        const useSymbol = await confirm({ message: "Filter by symbol?", default: false });
+        const symbol = useSymbol ? await promptFuturesSymbol("BTC/USDT:USDT") : undefined;
+        const result = await withLoading("Canceling all futures orders", async () =>
+          doFuturesOrderCancelAll(runtime, mode, scope, symbol)
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "orders-open" || choice === "orders-closed") {
+        const useSymbol = await confirm({ message: "Filter by symbol?", default: true });
+        const symbol = useSymbol ? await promptFuturesSymbol("BTC/USDT:USDT") : undefined;
+        const limit = await promptInt("Limit", 50);
+        const result = await withLoading(
+          choice === "orders-open" ? "Fetching open futures orders" : "Fetching closed futures orders",
+          async () =>
+            choice === "orders-open"
+              ? doFuturesOrdersOpen(runtime, mode, { scope, symbol, limit })
+              : doFuturesOrdersClosed(runtime, mode, { scope, symbol, limit })
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "balance") {
+        const result = await withLoading("Fetching futures balance", async () =>
+          doFuturesBalance(runtime, mode, scope)
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "positions") {
+        const useSymbol = await confirm({ message: "Filter by symbol?", default: false });
+        const symbol = useSymbol ? await promptFuturesSymbol("BTC/USDT:USDT") : undefined;
+        const result = await withLoading("Fetching futures positions", async () =>
+          doFuturesPositions(runtime, mode, { scope, symbol })
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "trades") {
+        const symbol = await promptFuturesSymbol("BTC/USDT:USDT");
+        const limit = await promptInt("Limit", 50);
+        const result = await withLoading("Fetching futures trades", async () =>
+          doFuturesTrades(runtime, mode, { scope, symbol, limit })
+        );
+        printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "quote") {
+        const symbol = await promptFuturesSymbol("BTC/USDT:USDT");
+        const depth = await promptInt("Orderbook depth", 5);
+        const result = await withLoading("Fetching futures quote", async () =>
+          doFuturesQuote(runtime, mode, { scope, symbol, depth })
+        );
+        printResult(result, Boolean(global.json));
+      }
+    } catch (error) {
+      printResult({ exitCode: 1, message: `futures interactive failed: ${String(error)}` }, Boolean(global.json));
+    }
+  }
+};
+
 const runInteractive = async (command: Command): Promise<void> => {
   const global = normalizeGlobalOptions(command);
   console.log("Vexis Interactive Console");
@@ -733,6 +1187,7 @@ const runInteractive = async (command: Command): Promise<void> => {
       choices: [
         { name: "Trading Cycle", value: "trading" },
         { name: "Spot Desk", value: "spot" },
+        { name: "Futures Desk", value: "futures" },
         { name: "Ops & Health", value: "ops" },
         { name: "Admin", value: "admin" },
         { name: "Exit", value: "exit" }
@@ -792,6 +1247,17 @@ const runInteractive = async (command: Command): Promise<void> => {
         await runSpotInteractive(global, runtime, mode);
       } catch (error) {
         printResult({ exitCode: 1, message: `spot setup failed: ${String(error)}` }, Boolean(global.json));
+      }
+      continue;
+    }
+
+    if (choice === "futures") {
+      try {
+        const { runtime, view } = resolveRuntimeConfig(global, {});
+        const mode = (view.effective.mode as PipelineMode) ?? "paper";
+        await runFuturesInteractive(global, runtime, mode);
+      } catch (error) {
+        printResult({ exitCode: 1, message: `futures setup failed: ${String(error)}` }, Boolean(global.json));
       }
       continue;
     }
@@ -914,6 +1380,10 @@ program
   .option("--output <format>", "Output format: pretty|json")
   .option("--mode <mode>", "Pipeline mode: backtest|paper|live-sim")
   .showHelpAfterError();
+
+program.action(async (_: unknown, command: Command) => {
+  await runInteractive(command);
+});
 
 program
   .command("run")
@@ -1255,6 +1725,237 @@ spotCommand
       process.exitCode = result.exitCode;
     } catch (error) {
       printResult({ exitCode: 1, message: `spot quote failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+const futuresCommand = program.command("futures").description("Binance futures actions (USD-M/COIN-M)");
+futuresCommand
+  .command("buy")
+  .description("Place futures buy order")
+  .requiredOption("--symbol <symbol>", "Futures symbol, e.g. BTC/USDT:USDT")
+  .option("--scope <scope>", "usdm|coinm")
+  .option("--type <type>", "market|limit", "market")
+  .option("--amount <amount>", "Order amount", (v) => Number.parseFloat(v))
+  .option("--price <price>", "Limit price", (v) => Number.parseFloat(v))
+  .option("--tif <tif>", "GTC|IOC|FOK")
+  .option("--reduce-only", "Reduce-only order")
+  .action(async (options: FuturesPlaceOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Placing futures buy", async () => doFuturesBuy(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `futures buy failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+futuresCommand
+  .command("sell")
+  .description("Place futures sell order")
+  .requiredOption("--symbol <symbol>", "Futures symbol, e.g. BTC/USDT:USDT")
+  .option("--scope <scope>", "usdm|coinm")
+  .option("--type <type>", "market|limit", "market")
+  .option("--amount <amount>", "Order amount", (v) => Number.parseFloat(v))
+  .option("--price <price>", "Limit price", (v) => Number.parseFloat(v))
+  .option("--tif <tif>", "GTC|IOC|FOK")
+  .option("--reduce-only", "Reduce-only order")
+  .action(async (options: FuturesPlaceOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Placing futures sell", async () => doFuturesSell(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `futures sell failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+const futuresOrderCommand = futuresCommand.command("order").description("Futures order operations");
+futuresOrderCommand
+  .command("get")
+  .description("Get futures order by id")
+  .requiredOption("--symbol <symbol>", "Futures symbol")
+  .requiredOption("--order-id <orderId>", "Exchange order id")
+  .option("--scope <scope>", "usdm|coinm")
+  .action(async (options: FuturesOrderGetOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Fetching futures order", async () => doFuturesOrderGet(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `futures order get failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+futuresOrderCommand
+  .command("cancel")
+  .description("Cancel futures order by id")
+  .requiredOption("--symbol <symbol>", "Futures symbol")
+  .requiredOption("--order-id <orderId>", "Exchange order id")
+  .option("--scope <scope>", "usdm|coinm")
+  .action(async (options: FuturesOrderCancelOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Canceling futures order", async () => doFuturesOrderCancel(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `futures order cancel failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+futuresOrderCommand
+  .command("cancel-all")
+  .description("Cancel all futures orders for symbol or all symbols")
+  .option("--scope <scope>", "usdm|coinm")
+  .option("--symbol <symbol>", "Futures symbol")
+  .action(async (options: { scope?: FuturesScope; symbol?: string }, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Canceling all futures orders", async () =>
+        doFuturesOrderCancelAll(runtime, mode, options.scope, options.symbol)
+      );
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `futures cancel-all failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+const futuresOrdersCommand = futuresCommand.command("orders").description("Futures order lists");
+futuresOrdersCommand
+  .command("open")
+  .description("Fetch open futures orders")
+  .option("--scope <scope>", "usdm|coinm")
+  .option("--symbol <symbol>", "Futures symbol")
+  .option("--limit <limit>", "Limit", (v) => Number.parseInt(v, 10), 50)
+  .action(async (options: FuturesOrdersListOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Fetching open futures orders", async () => doFuturesOrdersOpen(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `futures open orders failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+futuresOrdersCommand
+  .command("closed")
+  .description("Fetch closed futures orders")
+  .option("--scope <scope>", "usdm|coinm")
+  .option("--symbol <symbol>", "Futures symbol")
+  .option("--limit <limit>", "Limit", (v) => Number.parseInt(v, 10), 50)
+  .action(async (options: FuturesOrdersListOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Fetching closed futures orders", async () => doFuturesOrdersClosed(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `futures closed orders failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+futuresCommand
+  .command("balance")
+  .description("Fetch futures balance snapshot")
+  .option("--scope <scope>", "usdm|coinm")
+  .action(async (options: { scope?: FuturesScope }, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Fetching futures balance", async () =>
+        doFuturesBalance(runtime, mode, options.scope)
+      );
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `futures balance failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+futuresCommand
+  .command("positions")
+  .description("Fetch futures positions")
+  .option("--scope <scope>", "usdm|coinm")
+  .option("--symbol <symbol>", "Futures symbol")
+  .action(async (options: FuturesPositionsOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Fetching futures positions", async () => doFuturesPositions(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `futures positions failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+futuresCommand
+  .command("trades")
+  .description("Fetch my futures trades")
+  .requiredOption("--symbol <symbol>", "Futures symbol")
+  .option("--scope <scope>", "usdm|coinm")
+  .option("--limit <limit>", "Limit", (v) => Number.parseInt(v, 10), 50)
+  .action(async (options: FuturesTradesOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Fetching futures trades", async () => doFuturesTrades(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `futures trades failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+futuresCommand
+  .command("quote")
+  .description("Fetch futures quote + orderbook top")
+  .requiredOption("--symbol <symbol>", "Futures symbol")
+  .option("--scope <scope>", "usdm|coinm")
+  .option("--depth <depth>", "Orderbook depth", (v) => Number.parseInt(v, 10), 5)
+  .action(async (options: FuturesQuoteOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Fetching futures quote", async () => doFuturesQuote(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `futures quote failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
       process.exitCode = 1;
     }
   });

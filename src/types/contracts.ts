@@ -4,6 +4,13 @@ import type {
   BinanceAccountSnapshot,
   DecisionLogEntry,
   FundamentalsData,
+  FuturesBalanceSnapshot,
+  FuturesOrderRequest,
+  FuturesOrderResult,
+  FuturesPositionSnapshot,
+  FuturesQuoteSnapshot,
+  FuturesScope,
+  FuturesTradeRecord,
   HealthStatus,
   MarketDataQuery,
   MarketSnapshot,
@@ -132,5 +139,62 @@ export interface SpotTradingProvider {
     ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" },
     depth?: number
   ): Promise<SpotQuoteSnapshot>;
+}
+
+export interface FuturesTradingProvider {
+  placeOrder(
+    request: FuturesOrderRequest,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" }
+  ): Promise<FuturesOrderResult>;
+  fetchOrder(
+    scope: FuturesScope,
+    orderId: string,
+    symbol: string,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" }
+  ): Promise<FuturesOrderResult>;
+  fetchOpenOrders(
+    scope: FuturesScope,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" },
+    symbol?: string,
+    limit?: number
+  ): Promise<FuturesOrderResult[]>;
+  fetchClosedOrders(
+    scope: FuturesScope,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" },
+    symbol?: string,
+    limit?: number
+  ): Promise<FuturesOrderResult[]>;
+  cancelOrder(
+    scope: FuturesScope,
+    orderId: string,
+    symbol: string,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" }
+  ): Promise<FuturesOrderResult>;
+  cancelAllOrders(
+    scope: FuturesScope,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" },
+    symbol?: string
+  ): Promise<FuturesOrderResult[]>;
+  fetchBalanceSnapshot(
+    scope: FuturesScope,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" }
+  ): Promise<FuturesBalanceSnapshot>;
+  fetchPositions(
+    scope: FuturesScope,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" },
+    symbol?: string
+  ): Promise<FuturesPositionSnapshot[]>;
+  fetchMyTrades(
+    scope: FuturesScope,
+    symbol: string,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" },
+    limit?: number
+  ): Promise<FuturesTradeRecord[]>;
+  fetchQuote(
+    scope: FuturesScope,
+    symbol: string,
+    ctx: { runId: string; traceId: string; mode: "backtest" | "paper" | "live-sim" },
+    depth?: number
+  ): Promise<FuturesQuoteSnapshot>;
 }
 

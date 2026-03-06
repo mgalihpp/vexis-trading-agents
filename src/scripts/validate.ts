@@ -17,6 +17,7 @@ import {
 import { defaultRiskRules } from "../config/risk";
 import { BinanceAccountProvider } from "../core/account-state";
 import { InMemoryEventStore, SqliteEventStorePersistence } from "../core/event-store";
+import { BinanceFuturesTradingService } from "../core/futures-trading";
 import { HealthMonitor } from "../core/health";
 import { computeBackoffDelay } from "../core/ops";
 import { BinanceSpotTradingService } from "../core/spot-trading";
@@ -38,7 +39,7 @@ import {
 import { SimulatedExchange } from "../sim/simulated-exchange";
 import { formatChatStyleRunReport, printRunReport } from "../utils/report";
 import type { MarketDataQuery, OHLCVCandle, ProviderFetchResult } from "../types";
-import { ProviderError, SpotGuardError } from "../types";
+import { FuturesGuardError, ProviderError, SpotGuardError } from "../types";
 
 const makeClock = () => {
   let i = 0;
@@ -694,6 +695,269 @@ export const runDeterministicChecks = async (): Promise<void> => {
     spotTelemetry.getMetrics().some((m) => m.name === "spot_action_success"),
     true,
     "Spot actions should emit success/failure metrics"
+  );
+
+  const futuresTelemetry = new InMemoryTelemetrySink(false);
+  let usdmCreateOrderCalls = 0;
+  let coinmCreateOrderCalls = 0;
+  let usdmSetLeverageCalls = 0;
+  let usdmSetMarginModeCalls = 0;
+  let usdmSetPositionModeCalls = 0;
+  let usdmLoaded = 0;
+  let coinmLoaded = 0;
+
+  const makeMockFuturesClient = (scope: "usdm" | "coinm") => ({
+    loadMarkets: async () => {
+      if (scope === "usdm") usdmLoaded += 1;
+      if (scope === "coinm") coinmLoaded += 1;
+      return {
+        "BTC/USDT:USDT": {
+          symbol: "BTC/USDT:USDT",
+          swap: true,
+          linear: true,
+          inverse: false,
+          limits: {
+            amount: { min: 0.001, max: 1000 },
+            cost: { min: 5 },
+            price: { min: 1000, max: 1000000 }
+          }
+        },
+        "BTC/USD:BTC": {
+          symbol: "BTC/USD:BTC",
+          swap: true,
+          linear: false,
+          inverse: true,
+          limits: {
+            amount: { min: 1, max: 100000 },
+            cost: { min: 5 },
+            price: { min: 1000, max: 1000000 }
+          }
+        }
+      };
+    },
+    createOrder: async (
+      symbol: string,
+      type: string,
+      side: string,
+      amount: number,
+      price?: number,
+      _params?: Record<string, unknown>
+    ) => {
+      if (scope === "usdm") usdmCreateOrderCalls += 1;
+      if (scope === "coinm") coinmCreateOrderCalls += 1;
+      return {
+        id: `${scope}-order-${scope === "usdm" ? usdmCreateOrderCalls : coinmCreateOrderCalls}`,
+        symbol,
+        status: "open",
+        side,
+        type,
+        amount,
+        price,
+        average: price,
+        filled: 0,
+        remaining: amount,
+        cost: amount * (price ?? 70000),
+        reduceOnly: Boolean(_params?.reduceOnly),
+        timestamp: 1700000000000
+      };
+    },
+    fetchOrder: async (id: string, symbol: string) => ({
+      id,
+      symbol,
+      status: "closed",
+      side: "buy",
+      type: "limit",
+      amount: 0.01,
+      price: 70000,
+      average: 70000,
+      filled: 0.01,
+      remaining: 0,
+      cost: 700,
+      timestamp: 1700000000000
+    }),
+    fetchOpenOrders: async () => [],
+    fetchClosedOrders: async () => [],
+    cancelOrder: async (id: string, symbol: string) => ({
+      id,
+      symbol,
+      status: "canceled",
+      side: "buy",
+      type: "limit",
+      amount: 0.01,
+      price: 70000,
+      timestamp: 1700000000000
+    }),
+    cancelAllOrders: async () => [],
+    fetchBalance: async () => ({
+      free: { USDT: 100 },
+      used: { USDT: 10 },
+      total: { USDT: 110 }
+    }),
+    fetchPositions: async () => [
+      {
+        symbol: scope === "usdm" ? "BTC/USDT:USDT" : "BTC/USD:BTC",
+        side: "long",
+        contracts: 1,
+        entryPrice: 70000,
+        markPrice: 70200,
+        leverage: 3,
+        notional: 70000,
+        unrealizedPnl: 200,
+        marginMode: "isolated"
+      }
+    ],
+    fetchMyTrades: async (symbol?: string) => [
+      {
+        id: `${scope}-trade-1`,
+        order: `${scope}-order-1`,
+        symbol: symbol ?? (scope === "usdm" ? "BTC/USDT:USDT" : "BTC/USD:BTC"),
+        side: "buy",
+        price: 70000,
+        amount: 0.01,
+        cost: 700,
+        fee: { cost: 0.7, currency: "USDT" },
+        timestamp: 1700000000000
+      }
+    ],
+    fetchTicker: async () => ({ bid: 70000, ask: 70100, last: 70050 }),
+    fetchOrderBook: async () => ({
+      bids: [[70000, 1]] as Array<[number, number]>,
+      asks: [[70100, 1]] as Array<[number, number]>
+    }),
+    setLeverage: async (_leverage: number) => {
+      if (scope === "usdm") usdmSetLeverageCalls += 1;
+      return { ok: true };
+    },
+    setMarginMode: async (_marginMode: "cross" | "isolated") => {
+      if (scope === "usdm") usdmSetMarginModeCalls += 1;
+      return { ok: true };
+    },
+    setPositionMode: async (_hedged: boolean) => {
+      if (scope === "usdm") usdmSetPositionModeCalls += 1;
+      return { ok: true };
+    },
+    amountToPrecision: (_symbol: string, amount: number) => String(amount),
+    priceToPrecision: (_symbol: string, price: number) => String(price)
+  });
+
+  const futuresService = BinanceFuturesTradingService.getInstance({
+    enabled: true,
+    apiKey: "k",
+    apiSecret: "s",
+    symbolWhitelist: ["BTC/USDT:USDT", "BTC/USD:BTC"],
+    defaultScope: "usdm",
+    defaultTif: "GTC",
+    recvWindow: 10000,
+    timeoutMs: 5000,
+    defaultLeverage: 3,
+    marginMode: "isolated",
+    positionMode: "hedge",
+    telemetrySink: futuresTelemetry,
+    mode: "paper",
+    usdmClient: makeMockFuturesClient("usdm"),
+    coinmClient: makeMockFuturesClient("coinm")
+  });
+
+  await assert.rejects(
+    () =>
+      futuresService.placeOrder(
+        {
+          scope: "usdm",
+          symbol: "ETH/USDT:USDT",
+          side: "buy",
+          type: "market",
+          amount: 0.01
+        },
+        { runId: "fut-1", traceId: "fut-1", mode: "paper" }
+      ),
+    (error: unknown) => error instanceof FuturesGuardError,
+    "Futures guard should reject symbols outside whitelist"
+  );
+
+  await assert.rejects(
+    () =>
+      futuresService.placeOrder(
+        {
+          scope: "usdm",
+          symbol: "BTC/USDT:USDT",
+          side: "buy",
+          type: "market",
+          amount: 0.0001
+        },
+        { runId: "fut-2", traceId: "fut-2", mode: "paper" }
+      ),
+    (error: unknown) => error instanceof FuturesGuardError,
+    "Futures guard should reject amount below min"
+  );
+
+  const usdmPlaced = await futuresService.placeOrder(
+    {
+      scope: "usdm",
+      symbol: "BTC/USDT:USDT",
+      side: "buy",
+      type: "limit",
+      amount: 0.01,
+      price: 70000
+    },
+    { runId: "fut-3", traceId: "fut-3", mode: "paper" }
+  );
+  assert.equal(usdmPlaced.scope, "usdm", "USD-M order should map usdm scope");
+  assert.equal(usdmCreateOrderCalls, 1, "USD-M placeOrder should use usdm client");
+
+  await futuresService.placeOrder(
+    {
+      scope: "usdm",
+      symbol: "BTC/USDT:USDT",
+      side: "sell",
+      type: "limit",
+      amount: 0.01,
+      price: 71000
+    },
+    { runId: "fut-4", traceId: "fut-4", mode: "paper" }
+  );
+  assert.equal(usdmSetLeverageCalls, 1, "Leverage setup should be idempotent per symbol/scope");
+  assert.equal(usdmSetMarginModeCalls, 1, "Margin mode setup should be idempotent per symbol/scope");
+  assert.equal(usdmSetPositionModeCalls, 1, "Position mode setup should be idempotent per symbol/scope");
+
+  const coinmPlaced = await futuresService.placeOrder(
+    {
+      scope: "coinm",
+      symbol: "BTC/USD:BTC",
+      side: "sell",
+      type: "limit",
+      amount: 2,
+      price: 70000
+    },
+    { runId: "fut-5", traceId: "fut-5", mode: "paper" }
+  );
+  assert.equal(coinmPlaced.scope, "coinm", "COIN-M order should map coinm scope");
+  assert.equal(coinmCreateOrderCalls, 1, "COIN-M placeOrder should use coinm client");
+  assert.equal(usdmLoaded >= 1, true, "USD-M market metadata should be loaded");
+  assert.equal(coinmLoaded >= 1, true, "COIN-M market metadata should be loaded");
+
+  const futQuote = await futuresService.fetchQuote(
+    "usdm",
+    "BTC/USDT:USDT",
+    { runId: "fut-6", traceId: "fut-6", mode: "paper" },
+    1
+  );
+  assert.ok(futQuote.bid > 0 && futQuote.ask > 0, "Futures quote should include bid/ask");
+  const futTrades = await futuresService.fetchMyTrades(
+    "usdm",
+    "BTC/USDT:USDT",
+    { runId: "fut-7", traceId: "fut-7", mode: "paper" },
+    10
+  );
+  assert.equal(futTrades.length, 1, "Futures trades should map records");
+  const futPositions = await futuresService.fetchPositions(
+    "usdm",
+    { runId: "fut-8", traceId: "fut-8", mode: "paper" }
+  );
+  assert.equal(futPositions.length, 1, "Futures positions should map snapshots");
+  assert.equal(
+    futuresTelemetry.getMetrics().some((m) => m.name === "futures_action_success"),
+    true,
+    "Futures actions should emit success/failure metrics"
   );
 
   const delayAttempt1 = computeBackoffDelay({ maxAttempts: 3, initialDelayMs: 100, backoffFactor: 2, maxDelayMs: 1000, jitterMs: 0 }, 1);

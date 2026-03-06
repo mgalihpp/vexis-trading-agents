@@ -8,8 +8,8 @@
   },
   "scripts": {
     "build": "tsup",
-    "start": "node dist/cli.js run",
-    "dev": "tsx src/cli.ts run",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts",
     "validate": "npm run build && node dist/cli.js validate",
     "ops:tail": "npm run build && node dist/cli.js ops tail"
   },

@@ -13,6 +13,7 @@ Pipeline:
 - Real crypto inputs (CCXT market, CoinGecko, Alternative.me, TheNewsAPI).
 - Binance account snapshot integration (spot + USD-M + COIN-M).
 - Binance Spot CCXT action pack (live actions, whitelist guarded).
+- Binance Futures CCXT action pack (USD-M + COIN-M, leverage/margin/position pre-setup).
 - Observability stack (metrics/logs/alerts, SQLite persistence, health endpoints).
 - Continuous runner with interval + candle alignment + backoff.
 - Unified CLI (`vexis`) with interactive mode.
@@ -33,6 +34,7 @@ src/
 - Node.js 20+
 - npm 10+
 - Binance API key/secret for account + spot actions
+- Binance API key/secret for account + spot + futures actions
 - OpenRouter API key for LLM-driven nodes
 
 ## Installation
@@ -95,6 +97,22 @@ vexis spot trades --symbol BTC/USDT [--limit 50]
 vexis spot quote --symbol BTC/USDT [--depth 5]
 ```
 
+Futures commands:
+
+```bash
+vexis futures buy --scope usdm --symbol BTC/USDT:USDT --type market --amount 0.001
+vexis futures sell --scope usdm --symbol BTC/USDT:USDT --type limit --amount 0.001 --price 90000
+vexis futures order get --scope usdm --symbol BTC/USDT:USDT --order-id <id>
+vexis futures order cancel --scope usdm --symbol BTC/USDT:USDT --order-id <id>
+vexis futures order cancel-all --scope usdm [--symbol BTC/USDT:USDT]
+vexis futures orders open --scope usdm [--symbol BTC/USDT:USDT --limit 50]
+vexis futures orders closed --scope usdm [--symbol BTC/USDT:USDT --limit 50]
+vexis futures balance --scope usdm
+vexis futures positions --scope usdm [--symbol BTC/USDT:USDT]
+vexis futures trades --scope usdm --symbol BTC/USDT:USDT [--limit 50]
+vexis futures quote --scope usdm --symbol BTC/USDT:USDT [--depth 5]
+```
+
 Use `--json` on commands for machine-readable output.
 
 ## Interactive UX
@@ -103,6 +121,7 @@ Use `--json` on commands for machine-readable output.
 
 - `Trading Cycle`: run cycle / start runner
 - `Spot Desk`: buy, sell, order ops, balance, trades, quote
+- `Futures Desk`: buy, sell, order ops, balance, positions, trades, quote
 - `Ops & Health`: ops tail, health check, account check
 - `Admin`: doctor, env check, validate
 
@@ -168,6 +187,25 @@ Notes:
 - Execution is restricted to symbols in `BINANCE_SPOT_SYMBOL_WHITELIST`.
 - Withdraw/transfer are intentionally not included in this version.
 
+### Binance Futures actions
+
+```bash
+BINANCE_FUTURES_ENABLED=true
+BINANCE_FUTURES_SCOPE_DEFAULT=usdm                # usdm | coinm
+BINANCE_FUTURES_SYMBOL_WHITELIST=BTC/USDT:USDT,ETH/USDT:USDT,BTC/USD:BTC
+BINANCE_FUTURES_DEFAULT_TIF=GTC                   # GTC | IOC | FOK
+BINANCE_FUTURES_RECV_WINDOW=10000
+BINANCE_FUTURES_DEFAULT_LEVERAGE=3
+BINANCE_FUTURES_MARGIN_MODE=isolated              # isolated | cross
+BINANCE_FUTURES_POSITION_MODE=hedge               # hedge | oneway
+```
+
+Notes:
+
+- Futures actions are live by default when enabled.
+- Scope uses explicit CCXT classes: `binanceusdm` and `binancecoinm`.
+- Guard layer enforces whitelist, exchange min limits, and precision before placing orders.
+
 ### Observability, health, runner
 
 ```bash
@@ -204,6 +242,7 @@ npm run ops:tail -- --trace-id <trace-id> --since 2026-03-05T00:00:00.000Z --jso
 
 - Trading pipeline execution is still simulated (no live order placement from AI pipeline).
 - Binance Spot commands are live exchange actions when enabled.
+- Binance Futures commands are live exchange actions when enabled.
 - Use restricted API keys and symbol whitelist in production.
 
 ## Troubleshooting

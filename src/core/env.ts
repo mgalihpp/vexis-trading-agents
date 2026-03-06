@@ -2,9 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { config as loadDotEnv } from "dotenv";
 import { EnvSecretProvider } from "./secrets";
-import type { SpotTimeInForce } from "../types";
+import type { FuturesMarginMode, FuturesPositionMode, FuturesScope, FuturesTimeInForce, SpotTimeInForce } from "../types";
 
-loadDotEnv();
+loadDotEnv({ quiet: true });
 
 export interface RuntimeConfig {
   openRouterApiKey: string;
@@ -53,6 +53,14 @@ export interface RuntimeConfig {
   binanceSpotSymbolWhitelist: string[];
   binanceSpotDefaultTif: SpotTimeInForce;
   binanceSpotRecvWindow: number;
+  binanceFuturesEnabled: boolean;
+  binanceFuturesScopeDefault: FuturesScope;
+  binanceFuturesSymbolWhitelist: string[];
+  binanceFuturesDefaultTif: FuturesTimeInForce;
+  binanceFuturesRecvWindow: number;
+  binanceFuturesDefaultLeverage: number;
+  binanceFuturesMarginMode: FuturesMarginMode;
+  binanceFuturesPositionMode: FuturesPositionMode;
 }
 
 const asInt = (value: string | undefined, fallback: number): number => {
@@ -80,6 +88,35 @@ const asSpotTif = (value: string | undefined, fallback: SpotTimeInForce): SpotTi
     return normalized;
   }
   return fallback;
+};
+
+const asFuturesScope = (value: string | undefined, fallback: FuturesScope): FuturesScope => {
+  if (!value) return fallback;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "coinm" ? "coinm" : "usdm";
+};
+
+const asFuturesTif = (value: string | undefined, fallback: FuturesTimeInForce): FuturesTimeInForce => {
+  if (!value) return fallback;
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "GTC" || normalized === "IOC" || normalized === "FOK") return normalized;
+  return fallback;
+};
+
+const asFuturesMarginMode = (
+  value: string | undefined,
+  fallback: FuturesMarginMode
+): FuturesMarginMode => {
+  if (!value) return fallback;
+  return value.trim().toLowerCase() === "cross" ? "cross" : "isolated";
+};
+
+const asFuturesPositionMode = (
+  value: string | undefined,
+  fallback: FuturesPositionMode
+): FuturesPositionMode => {
+  if (!value) return fallback;
+  return value.trim().toLowerCase() === "oneway" ? "oneway" : "hedge";
 };
 
 const asHttpUrl = (value: string, envName: string): string => {
@@ -155,7 +192,18 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
       .map((v) => v.trim().toUpperCase())
       .filter(Boolean),
     binanceSpotDefaultTif: asSpotTif(process.env.BINANCE_SPOT_DEFAULT_TIF, "GTC"),
-    binanceSpotRecvWindow: asInt(process.env.BINANCE_SPOT_RECV_WINDOW, 10000)
+    binanceSpotRecvWindow: asInt(process.env.BINANCE_SPOT_RECV_WINDOW, 10000),
+    binanceFuturesEnabled: asBool(process.env.BINANCE_FUTURES_ENABLED, false),
+    binanceFuturesScopeDefault: asFuturesScope(process.env.BINANCE_FUTURES_SCOPE_DEFAULT, "usdm"),
+    binanceFuturesSymbolWhitelist: (process.env.BINANCE_FUTURES_SYMBOL_WHITELIST ?? "BTC/USDT:USDT,ETH/USDT:USDT")
+      .split(",")
+      .map((v) => v.trim().toUpperCase())
+      .filter(Boolean),
+    binanceFuturesDefaultTif: asFuturesTif(process.env.BINANCE_FUTURES_DEFAULT_TIF, "GTC"),
+    binanceFuturesRecvWindow: asInt(process.env.BINANCE_FUTURES_RECV_WINDOW, 10000),
+    binanceFuturesDefaultLeverage: asInt(process.env.BINANCE_FUTURES_DEFAULT_LEVERAGE, 3),
+    binanceFuturesMarginMode: asFuturesMarginMode(process.env.BINANCE_FUTURES_MARGIN_MODE, "isolated"),
+    binanceFuturesPositionMode: asFuturesPositionMode(process.env.BINANCE_FUTURES_POSITION_MODE, "hedge")
   };
 
   cfg.openRouterBaseUrl = asHttpUrl(cfg.openRouterBaseUrl, "OPENROUTER_BASE_URL");
@@ -187,6 +235,8 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
   failIf(cfg.binanceDefaultExposurePct < 0 || cfg.binanceDefaultExposurePct > 100, "BINANCE_DEFAULT_EXPOSURE_PCT must be within 0..100");
   failIf(cfg.binanceDefaultDrawdownPct < 0 || cfg.binanceDefaultDrawdownPct > 100, "BINANCE_DEFAULT_DRAWDOWN_PCT must be within 0..100");
   failIf(cfg.binanceSpotRecvWindow < 1000, "BINANCE_SPOT_RECV_WINDOW must be >= 1000");
+  failIf(cfg.binanceFuturesRecvWindow < 1000, "BINANCE_FUTURES_RECV_WINDOW must be >= 1000");
+  failIf(cfg.binanceFuturesDefaultLeverage < 1 || cfg.binanceFuturesDefaultLeverage > 125, "BINANCE_FUTURES_DEFAULT_LEVERAGE must be in 1..125");
 
   if (cfg.obsPersistEnabled) {
     const resolvedDbPath = path.resolve(cfg.obsSqlitePath);
@@ -210,6 +260,12 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
     failIf(!cfg.binanceApiKey, "BINANCE_API_KEY is required when BINANCE_SPOT_ENABLED=true");
     failIf(!cfg.binanceApiSecret, "BINANCE_API_SECRET is required when BINANCE_SPOT_ENABLED=true");
     failIf(cfg.binanceSpotSymbolWhitelist.length === 0, "BINANCE_SPOT_SYMBOL_WHITELIST must include at least one symbol when BINANCE_SPOT_ENABLED=true");
+  }
+
+  if (cfg.binanceFuturesEnabled) {
+    failIf(!cfg.binanceApiKey, "BINANCE_API_KEY is required when BINANCE_FUTURES_ENABLED=true");
+    failIf(!cfg.binanceApiSecret, "BINANCE_API_SECRET is required when BINANCE_FUTURES_ENABLED=true");
+    failIf(cfg.binanceFuturesSymbolWhitelist.length === 0, "BINANCE_FUTURES_SYMBOL_WHITELIST must include at least one symbol when BINANCE_FUTURES_ENABLED=true");
   }
 
   return cfg;

@@ -526,3 +526,107 @@ export class SpotGuardError extends Error {
     this.detail = detail;
   }
 }
+
+export type FuturesScope = "usdm" | "coinm";
+export type FuturesOrderType = "market" | "limit";
+export type FuturesOrderSide = "buy" | "sell";
+export type FuturesTimeInForce = "GTC" | "IOC" | "FOK";
+export type FuturesMarginMode = "isolated" | "cross";
+export type FuturesPositionMode = "oneway" | "hedge";
+
+export interface FuturesOrderRequest {
+  scope: FuturesScope;
+  symbol: string;
+  side: FuturesOrderSide;
+  type: FuturesOrderType;
+  amount: number;
+  price?: number;
+  tif?: FuturesTimeInForce;
+  reduceOnly?: boolean;
+  clientOrderId?: string;
+}
+
+export interface FuturesOrderResult {
+  exchange: "binance";
+  scope: FuturesScope;
+  symbol: string;
+  orderId: string;
+  clientOrderId?: string;
+  status: string;
+  side: FuturesOrderSide;
+  type: FuturesOrderType;
+  timeInForce?: FuturesTimeInForce;
+  amount: number | null;
+  price: number | null;
+  average: number | null;
+  filled: number | null;
+  remaining: number | null;
+  cost: number | null;
+  reduceOnly: boolean;
+  timestamp: string;
+}
+
+export interface FuturesBalanceAsset {
+  asset: string;
+  free: number;
+  used: number;
+  total: number;
+}
+
+export interface FuturesBalanceSnapshot {
+  exchange: "binance";
+  scope: FuturesScope;
+  timestamp: string;
+  assets: FuturesBalanceAsset[];
+}
+
+export interface FuturesPositionSnapshot {
+  symbol: string;
+  side: "long" | "short";
+  contracts: number;
+  entryPrice: number;
+  markPrice: number;
+  leverage: number;
+  notionalUsd: number;
+  unrealizedPnlUsd: number;
+  marginMode: FuturesMarginMode;
+}
+
+export interface FuturesTradeRecord {
+  id: string;
+  orderId?: string;
+  symbol: string;
+  side: FuturesOrderSide;
+  price: number;
+  amount: number;
+  cost: number;
+  feeCost?: number;
+  feeCurrency?: string;
+  timestamp: string;
+}
+
+export interface FuturesQuoteSnapshot {
+  scope: FuturesScope;
+  symbol: string;
+  timestamp: string;
+  bid: number;
+  ask: number;
+  last: number;
+  spread_bps: number;
+  orderbook_top: {
+    bids: Array<[number, number]>;
+    asks: Array<[number, number]>;
+  };
+}
+
+export class FuturesGuardError extends Error {
+  public readonly code: string;
+  public readonly detail?: JSONValue;
+
+  public constructor(code: string, message: string, detail?: JSONValue) {
+    super(message);
+    this.name = "FuturesGuardError";
+    this.code = code;
+    this.detail = detail;
+  }
+}

@@ -5,5 +5,5 @@ export const defaultRiskRules: RiskRules = {
   maxExposurePct: 35,
   drawdownCutoffPct: 12,
   maxAtrPct: 6,
-  minLiquidityUsd: 500000
+  minLiquidityUsd: 20,
 };
