@@ -525,7 +525,7 @@ export class RealCryptoDataProvider implements MarketDataProvider {
       this.ensureRequiredKeys();
     }
 
-    if (!this.marketsLoaded) {
+    if (!this.marketFetcher && !this.marketsLoaded) {
       await this.exchange.loadMarkets();
       this.marketsLoaded = true;
     }

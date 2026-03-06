@@ -38,8 +38,8 @@ import {
   tradeProposalSchema
 } from "../core/schemas";
 import { SimulatedExchange } from "../sim/simulated-exchange";
-import { formatChatStyleRunReport, printRunReport } from "../utils/report";
-import type { MarketDataQuery, OHLCVCandle, ProviderFetchResult } from "../types";
+import { formatChatStyleRunReport, formatStreamEvent, printRunReport } from "../utils/report";
+import type { DecisionLogEntry, MarketDataQuery, OHLCVCandle, ProviderFetchResult } from "../types";
 import { FuturesGuardError, ProviderError, SpotGuardError } from "../types";
 
 const makeClock = () => {
@@ -121,7 +121,10 @@ class MockDecisionRunner implements DecisionRunner {
   }
 }
 
-const buildPipeline = (runner: DecisionRunner) => {
+const buildPipeline = (
+  runner: DecisionRunner,
+  onLogEvent?: (event: DecisionLogEntry) => Promise<void> | void
+) => {
   const eventStore = new InMemoryEventStore();
   const telemetrySink = new InMemoryTelemetrySink(false);
   const healthMonitor = new HealthMonitor(telemetrySink, {
@@ -132,6 +135,7 @@ const buildPipeline = (runner: DecisionRunner) => {
 
   const pipeline = new TradingPipeline({
     eventStore,
+    onLogEvent,
     telemetrySink,
     healthMonitor,
     marketDataProvider: new BacktestDataProvider(),
@@ -195,6 +199,36 @@ export const runDeterministicChecks = async (): Promise<void> => {
   const metricNames = llmTelemetry.getMetrics().map((sample) => sample.name);
   assert.ok(metricNames.includes("node_latency_ms"), "Telemetry should include node latency metric");
   assert.ok(metricNames.includes("run_latency_ms"), "Telemetry should include run latency metric");
+
+  const streamedEvents: DecisionLogEntry[] = [];
+  const { pipeline: streamedPipeline } = buildPipeline(
+    new MockDecisionRunner("llm"),
+    async (event) => {
+      streamedEvents.push(event);
+    }
+  );
+  const streamedRun = await streamedPipeline.runCycle({
+    runId: "validate-stream-hook",
+    query: { asset: "BTC/USDT", timeframe: "1h", limit: 50 },
+    portfolio: { equityUsd: 100000, currentExposurePct: 10, currentDrawdownPct: 2, liquidityUsd: 900000 }
+  });
+  assert.ok(streamedEvents.length > 0, "onLogEvent should receive stream events");
+  assert.ok(
+    streamedEvents.length <= streamedRun.logs.length,
+    "onLogEvent stream count should never exceed stored logs",
+  );
+  for (const streamed of streamedEvents) {
+    const found = streamedRun.logs.some((log) =>
+      log.agent === streamed.agent &&
+      log.timestamp === streamed.timestamp &&
+      log.source === streamed.source &&
+      log.decisionRationale === streamed.decisionRationale
+    );
+    assert.ok(found, "Every onLogEvent payload should exist in run logs");
+  }
+  const streamLine = formatStreamEvent(streamedRun.logs[0]!, { useColor: false });
+  assert.ok(streamLine.includes("[SYSTEM]") || streamLine.includes("[LLM]") || streamLine.includes("[FALLBACK]"), "Stream event formatter should include source badge");
+  assert.ok(streamLine.includes(streamedRun.logs[0]!.agent), "Stream event formatter should include agent name");
 
   const { pipeline: retryPipeline } = buildPipeline(new MockDecisionRunner("retry_fallback"));
   const retryRun = await retryPipeline.runCycle({

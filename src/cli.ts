@@ -1275,15 +1275,13 @@ const runInteractive = async (command: Command): Promise<void> => {
       const interval = await promptInt("Interval seconds", 60);
       const candleAlign = await confirm({ message: "Candle align?", default: true });
       const maxBackoff = await promptInt("Max backoff seconds", 900);
-      await withLoading("Starting runner", async () =>
-        runApp(
-          toRunOverrides(global, { asset, timeframe, limit }, {
-            runnerEnabled: true,
-            runnerIntervalSeconds: interval,
-            runnerCandleAlign: candleAlign,
-            runnerMaxBackoffSeconds: maxBackoff,
-          }),
-        )
+      await runApp(
+        toRunOverrides(global, { asset, timeframe, limit }, {
+          runnerEnabled: true,
+          runnerIntervalSeconds: interval,
+          runnerCandleAlign: candleAlign,
+          runnerMaxBackoffSeconds: maxBackoff,
+        }),
       );
       continue;
     }
@@ -1461,15 +1459,13 @@ program
   .option("--show-telemetry", "Show telemetry")
   .action(async (options: RunnerOptions, command: Command) => {
     const global = normalizeGlobalOptions(command);
-    await withLoading("Starting runner", async () =>
-      runApp(
-        toRunOverrides(global, options, {
-          runnerEnabled: true,
-          runnerIntervalSeconds: options.interval,
-          runnerCandleAlign: options.candleAlign,
-          runnerMaxBackoffSeconds: options.maxBackoff,
-        }),
-      ),
+    await runApp(
+      toRunOverrides(global, options, {
+        runnerEnabled: true,
+        runnerIntervalSeconds: options.interval,
+        runnerCandleAlign: options.candleAlign,
+        runnerMaxBackoffSeconds: options.maxBackoff,
+      }),
     );
   });
 
