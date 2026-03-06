@@ -31,7 +31,7 @@ export const TA_MODEL_ARTIFACT: TaModelArtifact = {
   },
   regime: {
     lowVolThreshold: 0.008,
-    highVolThreshold: 0.03,
+    highVolThreshold: 0.75,
     trendAdxThreshold: 22,
     transitionSensitivity: 0.12,
     detectionLatencyCandles: 3,

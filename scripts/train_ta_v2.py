@@ -41,7 +41,7 @@ def build_default_artifact() -> Artifact:
         lookback={"minCandles": 80},
         regime={
             "lowVolThreshold": 0.008,
-            "highVolThreshold": 0.03,
+            "highVolThreshold": 0.75,
             "trendAdxThreshold": 22,
             "transitionSensitivity": 0.12,
             "detectionLatencyCandles": 3,
