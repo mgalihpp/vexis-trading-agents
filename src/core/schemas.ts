@@ -20,21 +20,86 @@ export const newsAnalysisSchema = z.object({
 });
 
 export const technicalAnalysisSchema = z.object({
-  indicators: z.object({
-    rsi: z.number(),
+  features: z.object({
+    rsi14: z.number(),
     macd: z.number(),
     macdSignal: z.number(),
-    emaFast: z.number(),
-    emaSlow: z.number(),
-    atr: z.number()
+    ema9: z.number(),
+    ema21: z.number(),
+    atr14: z.number(),
+    adx14: z.number(),
+    atrPercentile: z.number().min(0).max(1),
+    volumeZScore: z.number(),
+    wickBodyRatio: z.number(),
+    realizedVolatility: z.number().min(0)
   }),
-  trend: z.enum(["up", "down", "sideways"]),
-  signal: z.enum(["buy", "sell", "hold"]),
-  key_levels: z.object({
+  structure: z.object({
+    trend: z.enum(["up", "down", "sideways"]),
+    state: z.enum(["bullish", "bearish", "neutral"]),
+    bos: z.boolean(),
+    choch: z.boolean(),
+    swing_high: z.number(),
+    swing_low: z.number(),
     support: z.number(),
     resistance: z.number()
   }),
-  confidence: z.number().min(0).max(1)
+  liquidity: z.object({
+    sweep_detected: z.boolean(),
+    sweep_side: z.enum(["buy_side", "sell_side", "none"]),
+    sweep_score: z.number().min(0).max(1),
+    stop_hunt_score: z.number().min(0).max(1)
+  }),
+  smc: z.object({
+    order_blocks: z.array(
+      z.object({
+        side: z.enum(["demand", "supply"]),
+        low: z.number(),
+        high: z.number(),
+        strength: z.number().min(0).max(1),
+        mitigation_count: z.number().min(0),
+        age_candles: z.number().min(0)
+      })
+    ),
+    imbalances: z.array(
+      z.object({
+        side: z.enum(["bullish", "bearish"]),
+        low: z.number(),
+        high: z.number(),
+        gap_size_pct: z.number().min(0),
+        fill_probability: z.number().min(0).max(1)
+      })
+    ),
+    smc_score: z.number().min(0).max(1)
+  }),
+  regime: z.object({
+    state: z.enum(["low_vol", "trend", "high_vol_news"]),
+    transition_probability: z.number().min(0).max(1),
+    volatility_score: z.number().min(0).max(1),
+    detection_latency_candles: z.number().min(0)
+  }),
+  confirmation: z.object({
+    orthogonal_score: z.number().min(0).max(1),
+    collinearity_risk: z.number().min(0).max(1),
+    mtf_alignment_score: z.number().min(0).max(1),
+    htf_bias: z.enum(["bullish", "bearish", "neutral"])
+  }),
+  signals: z.object({
+    direction: z.enum(["buy", "sell", "hold"]),
+    calibrated_probability: z.number().min(0).max(1),
+    confidence_bucket: z.enum(["low", "medium", "high"]),
+    composite_score: z.number()
+  }),
+  shadow: z.object({
+    enabled: z.boolean(),
+    baseline: z.object({
+      trend: z.enum(["up", "down", "sideways"]),
+      signal: z.enum(["buy", "sell", "hold"]),
+      confidence: z.number().min(0).max(1),
+      support: z.number(),
+      resistance: z.number()
+    }),
+    agreement: z.boolean()
+  })
 });
 
 export const bullishResearchSchema = z.object({

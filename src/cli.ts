@@ -156,26 +156,69 @@ const withLoading = async <T>(
 ): Promise<T> => {
   const startedMs = Date.now();
   let frameIdx = 0;
+  let spinnerVisible = false;
+  let internalWrite = false;
+
+  const safeErrWrite = (text: string): void => {
+    internalWrite = true;
+    process.stderr.write(text);
+    internalWrite = false;
+  };
+
+  const clearSpinnerLine = (): void => {
+    if (!spinnerVisible) return;
+    safeErrWrite("\r\x1b[2K");
+    spinnerVisible = false;
+  };
+
+  const wrapStream = (stream: NodeJS.WriteStream): (() => void) => {
+    const original = stream.write.bind(stream);
+    (stream.write as unknown as (...args: unknown[]) => unknown) = (
+      chunk: unknown,
+      ...args: unknown[]
+    ): unknown => {
+      if (!internalWrite) {
+        clearSpinnerLine();
+      }
+      return original(chunk as never, ...(args as []));
+    };
+    return () => {
+      (stream.write as unknown as (...args: unknown[]) => unknown) = original as unknown as (
+        ...args: unknown[]
+      ) => unknown;
+    };
+  };
+
+  const restoreStdout = wrapStream(process.stdout);
+  const restoreStderr = wrapStream(process.stderr);
+
   const interval = setInterval(() => {
     const frame = SPINNER_FRAMES[frameIdx % SPINNER_FRAMES.length];
     frameIdx += 1;
-    process.stderr.write(
+    safeErrWrite(
       `\r${frame} ${label} (elapsed ${formatElapsed(startedMs)})`,
     );
+    spinnerVisible = true;
   }, 120);
 
   try {
     const result = await action();
     clearInterval(interval);
-    process.stderr.write(
+    clearSpinnerLine();
+    safeErrWrite(
       `\r[OK] ${label} completed in ${formatElapsed(startedMs)}\n`,
     );
+    restoreStdout();
+    restoreStderr();
     return result;
   } catch (error) {
     clearInterval(interval);
-    process.stderr.write(
+    clearSpinnerLine();
+    safeErrWrite(
       `\r[FAIL] ${label} failed after ${formatElapsed(startedMs)}\n`,
     );
+    restoreStdout();
+    restoreStderr();
     throw error;
   }
 };
@@ -884,7 +927,7 @@ const toRunOverrides = (
   extra?: Partial<AppRunOverrides>
 ): AppRunOverrides => ({
   mode: global.mode,
-  outputFormat: global.output,
+  outputFormat: global.output ?? (global.json ? "json" : undefined),
   envFile: global.envFile,
   showTelemetry: options.showTelemetry,
   query: {

@@ -226,12 +226,13 @@ const extractBullets = (
       };
     }
     case "TechnicalAnalyst": {
-      const indicators = asObject(output.indicators);
+      const signals = asObject(output.signals);
+      const regime = asObject(output.regime);
       return {
-        headline: `Technical signal: ${toString(output.signal) ?? "n/a"} (${toString(output.trend) ?? "n/a"})`,
+        headline: `Technical v2: ${toString(signals.direction) ?? "n/a"} (regime=${toString(regime.state) ?? "n/a"})`,
         bullets: [
-          `rsi=${formatNum(indicators.rsi, 2)} atr=${formatNum(indicators.atr, 2)}`,
-          `confidence=${formatNum(output.confidence)}`,
+          `prob=${formatNum(signals.calibrated_probability, 3)} conf=${toString(signals.confidence_bucket) ?? "n/a"}`,
+          `shadow_agreement=${String(asObject(output.shadow).agreement ?? "n/a")}`,
         ],
       };
     }

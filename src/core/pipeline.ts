@@ -86,6 +86,8 @@ export interface PipelineAgents {
       portfolio: PortfolioState;
       rules: RiskRules;
       atrPct: number;
+      regimeState?: import("../types").RegimeState;
+      calibratedProbability?: number;
     },
     RiskDecision
   >;
@@ -515,7 +517,7 @@ const buildGraph = (
           schema: decisionEnvelopeSchema(technicalAnalysisSchema),
           systemPrompt: llmPrompt(
             "TechnicalAnalyst",
-            "Interpret indicators and return trend/signal with key levels.",
+            "Generate TA v2 output: features, structure, liquidity, SMC, regime, confirmation, calibrated signals, and shadow comparison.",
           ),
           input: technicalInput,
           fallback: async () => ({
@@ -533,6 +535,54 @@ const buildGraph = (
             decision_rationale: string;
           }>,
         );
+        const technicalOutput = technicalResult.output.output as import("../types").TechnicalAnalysis;
+        await sink.emitMetric({
+          name: "mtf_conflict_rate",
+          value: technicalOutput.confirmation.mtf_alignment_score < 0.5 ? 1 : 0,
+          timestamp: ctx.nowIso(),
+          tags: eventTags(ctx, "TechnicalAnalyst", "system"),
+        });
+        await sink.emitMetric({
+          name: "ece",
+          value: Math.abs(
+            technicalOutput.signals.calibrated_probability -
+              (technicalOutput.signals.direction === "buy"
+                ? 1
+                : technicalOutput.signals.direction === "sell"
+                  ? 0
+                  : 0.5),
+          ),
+          timestamp: ctx.nowIso(),
+          tags: eventTags(ctx, "TechnicalAnalyst", "system"),
+        });
+        await sink.emitMetric({
+          name: "false_breakout_rate",
+          value: technicalOutput.liquidity.sweep_detected ? 1 : 0,
+          timestamp: ctx.nowIso(),
+          tags: eventTags(ctx, "TechnicalAnalyst", "system"),
+        });
+        await sink.emitMetric({
+          name: "precision_signal",
+          value: technicalOutput.signals.calibrated_probability,
+          timestamp: ctx.nowIso(),
+          tags: eventTags(ctx, "TechnicalAnalyst", "system"),
+        });
+        await sink.emitMetric({
+          name: "regime_latency",
+          value: technicalOutput.regime.detection_latency_candles,
+          timestamp: ctx.nowIso(),
+          tags: eventTags(ctx, "TechnicalAnalyst", "system"),
+        });
+        await sink.emitMetric({
+          name: "rr_multiple",
+          value:
+            technicalOutput.signals.direction === "hold"
+              ? 0
+              : technicalOutput.signals.calibrated_probability *
+                (technicalOutput.confirmation.mtf_alignment_score + 1),
+          timestamp: ctx.nowIso(),
+          tags: eventTags(ctx, "TechnicalAnalyst", "system"),
+        });
 
         const analysts: AnalystBundle = {
           fundamentals: fundamentalsResult.output.output,
@@ -713,7 +763,7 @@ const buildGraph = (
         const atrPct =
           state.snapshot.lastPrice === 0
             ? 0
-            : (state.analysts.technical.indicators.atr /
+            : (state.analysts.technical.features.atr14 /
                 state.snapshot.lastPrice) *
               100;
         const input = {
@@ -721,6 +771,8 @@ const buildGraph = (
           portfolio: state.portfolio,
           rules: state.riskRules,
           atrPct,
+          regimeState: state.analysts.technical.regime.state,
+          calibratedProbability: state.analysts.technical.signals.calibrated_probability,
         };
 
         const result = await runDecision({

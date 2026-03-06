@@ -211,24 +211,111 @@ export interface NewsAnalysis {
   confidence: number;
 }
 
-export interface IndicatorValues {
-  rsi: number;
+export type TechnicalDirection = "buy" | "sell" | "hold";
+export type TrendState = "up" | "down" | "sideways";
+export type StructureState = "bullish" | "bearish" | "neutral";
+export type RegimeState = "low_vol" | "trend" | "high_vol_news";
+export type ConfidenceBucket = "low" | "medium" | "high";
+
+export interface TechnicalFeatures {
+  rsi14: number;
   macd: number;
   macdSignal: number;
-  emaFast: number;
-  emaSlow: number;
-  atr: number;
+  ema9: number;
+  ema21: number;
+  atr14: number;
+  adx14: number;
+  atrPercentile: number;
+  volumeZScore: number;
+  wickBodyRatio: number;
+  realizedVolatility: number;
+}
+
+export interface StructureAnalysis {
+  trend: TrendState;
+  state: StructureState;
+  bos: boolean;
+  choch: boolean;
+  swing_high: number;
+  swing_low: number;
+  support: number;
+  resistance: number;
+}
+
+export interface LiquidityAnalysis {
+  sweep_detected: boolean;
+  sweep_side: "buy_side" | "sell_side" | "none";
+  sweep_score: number;
+  stop_hunt_score: number;
+}
+
+export interface OrderBlockZone {
+  side: "demand" | "supply";
+  low: number;
+  high: number;
+  strength: number;
+  mitigation_count: number;
+  age_candles: number;
+}
+
+export interface ImbalanceZone {
+  side: "bullish" | "bearish";
+  low: number;
+  high: number;
+  gap_size_pct: number;
+  fill_probability: number;
+}
+
+export interface SmartMoneyAnalysis {
+  order_blocks: OrderBlockZone[];
+  imbalances: ImbalanceZone[];
+  smc_score: number;
+}
+
+export interface RegimeAnalysis {
+  state: RegimeState;
+  transition_probability: number;
+  volatility_score: number;
+  detection_latency_candles: number;
+}
+
+export interface ConfirmationAnalysis {
+  orthogonal_score: number;
+  collinearity_risk: number;
+  mtf_alignment_score: number;
+  htf_bias: "bullish" | "bearish" | "neutral";
+}
+
+export interface SignalAnalysis {
+  direction: TechnicalDirection;
+  calibrated_probability: number;
+  confidence_bucket: ConfidenceBucket;
+  composite_score: number;
+}
+
+export interface LegacyTechnicalSnapshot {
+  trend: TrendState;
+  signal: TechnicalDirection;
+  confidence: number;
+  support: number;
+  resistance: number;
+}
+
+export interface ShadowComparison {
+  enabled: boolean;
+  baseline: LegacyTechnicalSnapshot;
+  agreement: boolean;
 }
 
 export interface TechnicalAnalysis {
-  indicators: IndicatorValues;
-  trend: "up" | "down" | "sideways";
-  signal: "buy" | "sell" | "hold";
-  key_levels: {
-    support: number;
-    resistance: number;
-  };
-  confidence: number;
+  features: TechnicalFeatures;
+  structure: StructureAnalysis;
+  liquidity: LiquidityAnalysis;
+  smc: SmartMoneyAnalysis;
+  regime: RegimeAnalysis;
+  confirmation: ConfirmationAnalysis;
+  signals: SignalAnalysis;
+  shadow: ShadowComparison;
 }
 
 export interface AnalystBundle {
