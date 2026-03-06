@@ -47,15 +47,8 @@ cp .env.example .env
 Global install:
 
 ```bash
-npm i -g @mgalihpp/vexis-trading-agents --registry=https://npm.pkg.github.com
+npm i -g vexis-trading-agents
 vexis env init --scope global
-```
-
-Authenticate for GitHub Packages before install/publish:
-
-```bash
-echo "@mgalihpp:registry=https://npm.pkg.github.com" >> ~/.npmrc
-echo "//npm.pkg.github.com/:_authToken=YOUR_GITHUB_TOKEN" >> ~/.npmrc
 ```
 
 ## Build & Validate
