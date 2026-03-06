@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { confirm, input, select } from "@inquirer/prompts";
 import { Command } from "commander";
 import { randomUUID } from "node:crypto";
