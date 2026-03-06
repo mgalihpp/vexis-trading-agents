@@ -25,13 +25,15 @@ import { FanoutTelemetrySink, InMemoryTelemetrySink, SqliteTelemetrySink } from 
 import { SimulatedExchange } from "./sim/simulated-exchange";
 import type {
   AccountStateProvider,
+  DecisionLogEntry,
+  EventStore,
   MarketDataQuery,
   OutputFormat,
   PipelineMode,
   RunnerState,
   TelemetrySink
 } from "./types";
-import { printRunReport } from "./utils/report";
+import { createStreamPrinter, formatRunnerCycleSummary, printRunReport } from "./utils/report";
 
 export interface AppRunOverrides {
   mode?: PipelineMode;
@@ -59,6 +61,26 @@ const parseOutput = (value: string | undefined): OutputFormat | undefined => {
   }
   return undefined;
 };
+
+class StreamEventStore implements EventStore {
+  public constructor(
+    private readonly base: EventStore,
+    private readonly onEvent?: (event: DecisionLogEntry) => Promise<void> | void
+  ) {}
+
+  public async append(event: DecisionLogEntry): Promise<void> {
+    await this.base.append(event);
+    await this.onEvent?.(event);
+  }
+
+  public getAll(): DecisionLogEntry[] {
+    return this.base.getAll();
+  }
+
+  public clear(): void {
+    this.base.clear();
+  }
+}
 
 export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => {
   const { runtime, meta } = loadRuntimeConfigWithMeta({ envFile: overrides.envFile });
@@ -93,7 +115,19 @@ export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => 
   const eventPersistence = runtime.obsPersistEnabled
     ? new SqliteEventStorePersistence(runtime.obsSqlitePath)
     : undefined;
-  const eventStore = new InMemoryEventStore(eventPersistence);
+  const baseEventStore = new InMemoryEventStore(eventPersistence);
+  const streamingEnabled = outputFormat === "pretty" && !runnerEnabled;
+  const streamPrinters = new Map<string, ReturnType<typeof createStreamPrinter>>();
+  const eventStore = new StreamEventStore(baseEventStore, (event) => {
+    if (!streamingEnabled) return;
+    let printer = streamPrinters.get(event.runId);
+    if (!printer) {
+      printer = createStreamPrinter({ runId: event.runId, mode, query });
+      printer.printHeader();
+      streamPrinters.set(event.runId, printer);
+    }
+    printer.printEvent(event);
+  });
 
   const healthMonitor = new HealthMonitor(sink, {
     maxP95RunLatencyMs: runtime.sloP95RunLatencyMs,
@@ -195,13 +229,18 @@ export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => 
   });
 
   const printCycle = async (result: PipelineRunResult): Promise<void> => {
-    printRunReport({
-      runId: result.logs[0]?.runId ?? "unknown",
-      mode,
-      query,
-      result,
-      outputFormat
-    });
+    const runId = result.logs[0]?.runId ?? "unknown";
+    if (runnerEnabled && outputFormat === "pretty") {
+      console.log(formatRunnerCycleSummary({ runId, mode, query, result, outputFormat }));
+    } else {
+      printRunReport({
+        runId,
+        mode,
+        query,
+        result,
+        outputFormat
+      });
+    }
 
     if (showTelemetry) {
       console.log("--- Telemetry ---");
