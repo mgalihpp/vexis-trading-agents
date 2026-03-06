@@ -25,7 +25,7 @@ export class BullishResearcher extends BaseAgent<AnalystBundle, BullishResearch>
     if (input.sentiment.sentiment_score > 0) {
       args.push("Market sentiment leans risk-on.");
     }
-    if (input.technical.signal === "buy") {
+    if (input.technical.signals.direction === "buy") {
       args.push("Technical setup aligns with momentum continuation.");
     }
     if (input.news.event_impact !== "bearish") {
@@ -33,7 +33,7 @@ export class BullishResearcher extends BaseAgent<AnalystBundle, BullishResearch>
     }
 
     const reward_estimate_pct = round(
-      clamp(2 + input.technical.confidence * 6 + input.sentiment.confidence * 3, 1, 15),
+      clamp(2 + input.technical.signals.calibrated_probability * 6 + input.sentiment.confidence * 3, 1, 15),
       3
     );
 
@@ -67,7 +67,7 @@ export class BearishResearcher extends BaseAgent<AnalystBundle, BearishResearch>
       bearish_arguments.push("Negative event cluster increases downside tail risk.");
       failure_modes.push("Policy headline shock drives gap-down move.");
     }
-    if (input.technical.signal === "sell") {
+    if (input.technical.signals.direction === "sell") {
       bearish_arguments.push("Momentum profile warns of trend exhaustion.");
       failure_modes.push("Support breach accelerates liquidations.");
     }

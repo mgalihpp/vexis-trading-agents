@@ -14,6 +14,8 @@ export interface RiskInput {
   portfolio: PortfolioState;
   rules: RiskRules;
   atrPct: number;
+  regimeState?: "low_vol" | "trend" | "high_vol_news";
+  calibratedProbability?: number;
 }
 
 export class RiskManager extends BaseAgent<RiskInput, RiskDecision> {
@@ -43,6 +45,16 @@ export class RiskManager extends BaseAgent<RiskInput, RiskDecision> {
     if (input.atrPct > input.rules.maxAtrPct) {
       adjustedSize *= 0.5;
       reasons.push("Volatility above ATR threshold.");
+    }
+
+    if (input.regimeState === "high_vol_news") {
+      adjustedSize *= 0.6;
+      reasons.push("Regime high_vol_news: reduced size for tail-risk control.");
+    }
+
+    if ((input.calibratedProbability ?? 0.5) < 0.45) {
+      adjustedSize *= 0.7;
+      reasons.push("Low calibrated technical probability.");
     }
 
     if (input.portfolio.liquidityUsd < input.rules.minLiquidityUsd) {
