@@ -13,10 +13,12 @@ import type {
   FuturesTradeRecord,
   MetricTags,
   PipelineMode,
+  ProtectionSummary,
   TelemetrySink,
 } from "../types";
 import { FuturesGuardError, ProviderError } from "../types";
 import { withTimeout } from "./ops";
+import { ProtectionGroupStore, type ProtectionModeRecord } from "./protection-store";
 
 type CcxtTicker = { bid?: number; ask?: number; last?: number };
 type CcxtOrderBook = { bids?: Array<[number, number]>; asks?: Array<[number, number]> };
@@ -72,6 +74,7 @@ type FuturesMarket = {
   swap?: boolean;
   linear?: boolean;
   inverse?: boolean;
+  contractSize?: number;
   limits?: {
     amount?: { min?: number; max?: number };
     cost?: { min?: number; max?: number };
@@ -85,7 +88,7 @@ interface FuturesClientLike {
     symbol: string,
     type: string,
     side: string,
-    amount: number,
+    amount?: number,
     price?: number,
     params?: Record<string, unknown>
   ) => Promise<CcxtOrder>;
@@ -166,6 +169,7 @@ export interface BinanceFuturesTradingServiceConfig {
   defaultLeverage: number;
   marginMode: FuturesMarginMode;
   positionMode: FuturesPositionMode;
+  protectionDbPath?: string;
   telemetrySink?: TelemetrySink;
   mode?: PipelineMode;
   usdmClient?: FuturesClientLike;
@@ -188,6 +192,8 @@ export class BinanceFuturesTradingService {
   private readonly symbolWhitelist: Set<string>;
   private readonly usdmClient: FuturesClientLike;
   private readonly coinmClient: FuturesClientLike;
+  private readonly protectionStore?: ProtectionGroupStore;
+  private monitorTimer: NodeJS.Timeout | null = null;
   private readonly markets = new Map<FuturesScope, Map<string, FuturesMarket>>();
   private readonly scopeSetup = new Map<FuturesScope, Set<string>>();
   private lastRunId = "futures-run";
@@ -202,6 +208,10 @@ export class BinanceFuturesTradingService {
     this.symbolWhitelist = new Set(config.symbolWhitelist.map((s) => s.trim().toUpperCase()).filter(Boolean));
     this.usdmClient = config.usdmClient ?? this.createClient("usdm");
     this.coinmClient = config.coinmClient ?? this.createClient("coinm");
+    if (config.protectionDbPath) {
+      this.protectionStore = new ProtectionGroupStore(config.protectionDbPath);
+      this.startProtectionMonitor();
+    }
     this.markets.set("usdm", new Map());
     this.markets.set("coinm", new Map());
     this.scopeSetup.set("usdm", new Set());
@@ -236,21 +246,71 @@ export class BinanceFuturesTradingService {
       if (normalized.clientOrderId) {
         params.newClientOrderId = normalized.clientOrderId;
       }
+      if (this.config.positionMode === "hedge") {
+        params.positionSide = normalized.reduceOnly
+          ? (normalized.side === "sell" ? "LONG" : "SHORT")
+          : (normalized.side === "buy" ? "LONG" : "SHORT");
+      }
+      if (normalized.stopLoss) {
+        params.stopLossPrice = normalized.stopLoss;
+      }
+      if (normalized.takeProfit) {
+        params.takeProfitPrice = normalized.takeProfit;
+      }
 
       const client = this.getClient(scope);
-      const row = await withTimeout(
-        client.createOrder(
-          normalized.symbol,
-          normalized.type,
-          normalized.side,
-          normalized.amount,
-          normalized.price,
-          params
-        ),
-        this.timeoutMs,
-        "BINANCE_FUTURES_CREATE_ORDER_TIMEOUT"
-      );
+      let row: CcxtOrder;
+      let nativeProtectionApplied = false;
+      try {
+        row = await withTimeout(
+          client.createOrder(
+            normalized.symbol,
+            normalized.type,
+            normalized.side,
+            normalized.amount,
+            normalized.price,
+            params
+          ),
+          this.timeoutMs,
+          "BINANCE_FUTURES_CREATE_ORDER_TIMEOUT"
+        );
+        nativeProtectionApplied = Boolean(normalized.stopLoss || normalized.takeProfit);
+      } catch (nativeError) {
+        if (!(normalized.stopLoss || normalized.takeProfit)) {
+          throw nativeError;
+        }
+        delete params.stopLossPrice;
+        delete params.takeProfitPrice;
+        row = await withTimeout(
+          client.createOrder(
+            normalized.symbol,
+            normalized.type,
+            normalized.side,
+            normalized.amount,
+            normalized.price,
+            params
+          ),
+          this.timeoutMs,
+          "BINANCE_FUTURES_CREATE_ORDER_TIMEOUT"
+        );
+      }
       const mapped = this.mapOrder(scope, row, normalized.symbol, normalized.side, normalized.type, normalized.tif);
+      try {
+        mapped.protection = await this.attachOrQueueProtection(
+          scope,
+          normalized,
+          mapped,
+          nativeProtectionApplied ? "native" : "fallback"
+        );
+      } catch (protectionError) {
+        await this.telemetrySink.emitMetric({
+          name: "protection_create_failure",
+          value: 1,
+          timestamp: new Date().toISOString(),
+          tags: this.tags("futures_protection_create", { scope, symbol: normalized.symbol }),
+        });
+        throw protectionError;
+      }
       await this.emitActionSuccess(action, started, {
         scope,
         symbol: normalized.symbol,
@@ -518,6 +578,69 @@ export class BinanceFuturesTradingService {
     }, { symbol: symbol.trim().toUpperCase() });
   }
 
+  public async armProtectionManual(
+    input: {
+      scope: FuturesScope;
+      symbol: string;
+      side: "buy" | "sell";
+      amount: number;
+      stopLoss?: number;
+      takeProfit?: number;
+    },
+    ctx: FuturesActionContext
+  ): Promise<ProtectionSummary> {
+    this.setRunContext(ctx);
+    return this.runAction("futures_arm_protection", input.scope, async () => {
+      if (!this.protectionStore) {
+        throw new FuturesGuardError("FUTURES_PROTECTION_STORE_DISABLED", "Protection requires protectionDbPath configuration.");
+      }
+      const symbol = input.symbol.trim().toUpperCase();
+      const amount = asPositive(input.amount);
+      const stopLoss = asPositive(input.stopLoss);
+      const takeProfit = asPositive(input.takeProfit);
+      if (!amount) {
+        throw new FuturesGuardError("FUTURES_AMOUNT_REQUIRED", "Manual protection requires amount > 0.");
+      }
+      if (!stopLoss && !takeProfit) {
+        throw new FuturesGuardError("FUTURES_PROTECTION_TARGET_REQUIRED", "Provide stopLoss and/or takeProfit.");
+      }
+      const market = await this.guardSymbol(input.scope, symbol);
+      const normalizedAmount = await this.normalizeOrderAmount(input.scope, symbol, market, amount);
+      if (stopLoss) this.assertPriceGuard(symbol, stopLoss, market);
+      if (takeProfit) this.assertPriceGuard(symbol, takeProfit, market);
+      await this.assertProtectionPriceDirection({
+        scope: input.scope,
+        symbol,
+        side: input.side,
+        stopLoss,
+        takeProfit,
+      });
+      const parentOrderId = `manual-${Date.now()}-${Math.round(Math.random() * 1_000_000)}`;
+      const group = this.protectionStore.upsertPending({
+        scope: input.scope,
+        symbol,
+        parentOrderId,
+        parentSide: input.side,
+        parentType: "market",
+        slPrice: stopLoss,
+        tpPrice: takeProfit,
+      });
+      const created = await this.createFuturesProtectionOrders(input.scope, symbol, input.side, normalizedAmount, stopLoss, takeProfit);
+      this.protectionStore.markActive(group.id, {
+        mode: created.mode,
+        slOrderId: created.slOrderId,
+        tpOrderId: created.tpOrderId,
+      });
+      return {
+        enabled: true,
+        mode: created.mode,
+        parentOrderId,
+        slOrderId: created.slOrderId,
+        tpOrderId: created.tpOrderId,
+      };
+    }, { symbol: input.symbol.trim().toUpperCase() });
+  }
+
   private createClient(scope: FuturesScope): FuturesClientLike {
     const exchangeId = scope === "usdm" ? "binanceusdm" : "binancecoinm";
     const ctor = (ccxt as unknown as Record<string, new (args: Record<string, unknown>) => Exchange>)[exchangeId];
@@ -596,6 +719,8 @@ export class BinanceFuturesTradingService {
     const type = request.type === "limit" ? "limit" : "market";
     const amount = asPositive(request.amount);
     const price = asPositive(request.price);
+    const stopLoss = asPositive(request.stopLoss);
+    const takeProfit = asPositive(request.takeProfit);
     const tif = request.tif ?? this.config.defaultTif;
     if (!amount) {
       throw new FuturesGuardError("FUTURES_AMOUNT_REQUIRED", "Futures order requires amount > 0.");
@@ -603,17 +728,29 @@ export class BinanceFuturesTradingService {
     if (type === "limit" && !price) {
       throw new FuturesGuardError("FUTURES_PRICE_REQUIRED", "Limit futures order requires price > 0.");
     }
-    this.assertAmountGuard(symbol, amount, market);
+    const normalizedAmount = await this.normalizeOrderAmount(scope, symbol, market, amount, price);
     if (price) this.assertPriceGuard(symbol, price, market);
-    await this.assertNotionalGuard(scope, market, symbol, amount, price);
+    if (stopLoss) this.assertPriceGuard(symbol, stopLoss, market);
+    if (takeProfit) this.assertPriceGuard(symbol, takeProfit, market);
+    await this.assertNotionalGuard(scope, market, symbol, normalizedAmount, price);
+    await this.assertProtectionPriceDirection({
+      scope,
+      symbol,
+      side,
+      basePrice: price,
+      stopLoss,
+      takeProfit,
+    });
     return {
       ...request,
       scope,
       symbol,
       side,
       type,
-      amount,
+      amount: normalizedAmount,
       price,
+      stopLoss,
+      takeProfit,
       tif
     };
   }
@@ -634,6 +771,49 @@ export class BinanceFuturesTradingService {
         throw new FuturesGuardError("FUTURES_AMOUNT_PRECISION_INVALID", `Amount ${amount} violates precision.`, { rounded });
       }
     }
+  }
+
+  private async normalizeOrderAmount(
+    scope: FuturesScope,
+    symbol: string,
+    market: FuturesMarket,
+    amount: number,
+    price?: number
+  ): Promise<number> {
+    const min = asPositive(market.limits?.amount?.min);
+    if (!min || amount >= min) {
+      this.assertAmountGuard(symbol, amount, market);
+      return amount;
+    }
+    const contractSize = asPositive(market.contractSize);
+    if (!contractSize) {
+      this.assertAmountGuard(symbol, amount, market);
+      return amount;
+    }
+    let converted = amount;
+    if (market.inverse) {
+      let refPrice = price ?? 0;
+      if (!(refPrice > 0)) {
+        const ticker = await withTimeout(
+          this.getClient(scope).fetchTicker(symbol),
+          this.timeoutMs,
+          "BINANCE_FUTURES_TICKER_FOR_AMOUNT_NORMALIZE_TIMEOUT"
+        );
+        refPrice = asNum(ticker.last) || asNum(ticker.bid) || asNum(ticker.ask);
+      }
+      if (!(refPrice > 0)) {
+        throw new FuturesGuardError("FUTURES_AMOUNT_CONVERSION_REFERENCE_PRICE_MISSING", "Cannot convert base amount to contracts without reference price.");
+      }
+      converted = (amount * refPrice) / contractSize;
+    } else {
+      converted = amount / contractSize;
+    }
+    const client = market.inverse ? this.coinmClient : this.usdmClient;
+    if (client.amountToPrecision) {
+      converted = Number(client.amountToPrecision(symbol, converted));
+    }
+    this.assertAmountGuard(symbol, converted, market);
+    return converted;
   }
 
   private assertPriceGuard(symbol: string, price: number, market: FuturesMarket): void {
@@ -678,6 +858,289 @@ export class BinanceFuturesTradingService {
         "FUTURES_NOTIONAL_BELOW_MIN",
         `Estimated notional ${notional.toFixed(8)} < min ${minCost}.`
       );
+    }
+  }
+
+  private async assertProtectionPriceDirection(input: {
+    scope: FuturesScope;
+    symbol: string;
+    side: "buy" | "sell";
+    basePrice?: number;
+    stopLoss?: number;
+    takeProfit?: number;
+  }): Promise<void> {
+    if (!input.stopLoss && !input.takeProfit) return;
+    let refPrice = input.basePrice ?? 0;
+    if (!(refPrice > 0)) {
+      const ticker = await withTimeout(
+        this.getClient(input.scope).fetchTicker(input.symbol),
+        this.timeoutMs,
+        "BINANCE_FUTURES_TICKER_FOR_PROTECTION_GUARD_TIMEOUT"
+      );
+      refPrice = asNum(ticker.last) || asNum(ticker.bid) || asNum(ticker.ask);
+    }
+    if (!(refPrice > 0)) {
+      throw new FuturesGuardError("FUTURES_PROTECTION_REFERENCE_PRICE_MISSING", "Unable to infer reference price for SL/TP validation.");
+    }
+    if (input.side === "buy") {
+      if (input.stopLoss && input.stopLoss >= refPrice) {
+        throw new FuturesGuardError("FUTURES_STOP_LOSS_INVALID", `Stop-loss ${input.stopLoss} must be below reference price ${refPrice}.`);
+      }
+      if (input.takeProfit && input.takeProfit <= refPrice) {
+        throw new FuturesGuardError("FUTURES_TAKE_PROFIT_INVALID", `Take-profit ${input.takeProfit} must be above reference price ${refPrice}.`);
+      }
+      return;
+    }
+    if (input.stopLoss && input.stopLoss <= refPrice) {
+      throw new FuturesGuardError("FUTURES_STOP_LOSS_INVALID", `Stop-loss ${input.stopLoss} must be above reference price ${refPrice}.`);
+    }
+    if (input.takeProfit && input.takeProfit >= refPrice) {
+      throw new FuturesGuardError("FUTURES_TAKE_PROFIT_INVALID", `Take-profit ${input.takeProfit} must be below reference price ${refPrice}.`);
+    }
+  }
+
+  private async attachOrQueueProtection(
+    scope: FuturesScope,
+    request: FuturesOrderRequest,
+    parent: FuturesOrderResult,
+    preferredMode: ProtectionModeRecord
+  ): Promise<ProtectionSummary | undefined> {
+    if (!request.stopLoss && !request.takeProfit) return undefined;
+    if (!this.protectionStore) {
+      throw new FuturesGuardError("FUTURES_PROTECTION_STORE_DISABLED", "Protection requires protectionDbPath configuration.");
+    }
+    const parentId = parent.orderId;
+    if (!parentId) {
+      throw new FuturesGuardError("FUTURES_PARENT_ORDER_ID_MISSING", "Parent order id missing while creating protections.");
+    }
+    const group = this.protectionStore.upsertPending({
+      scope,
+      symbol: request.symbol,
+      parentOrderId: parentId,
+      parentSide: request.side,
+      parentType: request.type,
+      slPrice: request.stopLoss,
+      tpPrice: request.takeProfit,
+    });
+    const filled = asNum(parent.filled);
+    if (request.type === "limit" && filled <= 0) {
+      return {
+        enabled: true,
+        mode: preferredMode,
+        parentOrderId: parentId,
+      };
+    }
+    const quantity = filled > 0 ? filled : asNum(request.amount);
+    if (!(quantity > 0)) {
+      throw new FuturesGuardError("FUTURES_PROTECTION_AMOUNT_UNKNOWN", "Unable to determine filled amount for SL/TP.");
+    }
+    const created = await this.createFuturesProtectionOrders(scope, request.symbol, request.side, quantity, request.stopLoss, request.takeProfit);
+    this.protectionStore.markActive(group.id, {
+      mode: created.mode,
+      slOrderId: created.slOrderId,
+      tpOrderId: created.tpOrderId,
+    });
+    await this.telemetrySink.emitMetric({
+      name: "protection_create_success",
+      value: 1,
+      timestamp: new Date().toISOString(),
+      tags: this.tags("futures_protection_create", { scope, symbol: request.symbol, mode: created.mode }),
+    });
+    if (created.mode === "fallback") {
+      await this.telemetrySink.emitMetric({
+        name: "protection_fallback_used",
+        value: 1,
+        timestamp: new Date().toISOString(),
+        tags: this.tags("futures_protection_create", { scope, symbol: request.symbol }),
+      });
+    }
+    return {
+      enabled: true,
+      mode: created.mode,
+      parentOrderId: parentId,
+      slOrderId: created.slOrderId,
+      tpOrderId: created.tpOrderId,
+    };
+  }
+
+  private async createFuturesProtectionOrders(
+    scope: FuturesScope,
+    symbol: string,
+    parentSide: "buy" | "sell",
+    amount: number,
+    stopLoss?: number,
+    takeProfit?: number
+  ): Promise<{ mode: ProtectionModeRecord; slOrderId?: string; tpOrderId?: string }> {
+    const client = this.getClient(scope);
+    const closeSide: "buy" | "sell" = parentSide === "buy" ? "sell" : "buy";
+    const positionSide = parentSide === "buy" ? "LONG" : "SHORT";
+    const hedgeMode = this.config.positionMode === "hedge";
+    const sharedNativeParams = {
+      recvWindow: this.recvWindow,
+      closePosition: true,
+      ...(hedgeMode ? { positionSide } : {}),
+    };
+    const created: { mode: ProtectionModeRecord; slOrderId?: string; tpOrderId?: string } = { mode: "fallback" };
+    let mode: ProtectionModeRecord = "fallback";
+    try {
+      if (stopLoss) {
+        const sl = await withTimeout(
+          client.createOrder(symbol, "STOP_MARKET", closeSide, undefined, undefined, {
+            stopPrice: stopLoss,
+            ...sharedNativeParams,
+          }),
+          this.timeoutMs,
+          "BINANCE_FUTURES_CREATE_SL_TIMEOUT"
+        );
+        created.slOrderId = sl.id ? String(sl.id) : undefined;
+      }
+      if (takeProfit) {
+        const tp = await withTimeout(
+          client.createOrder(symbol, "TAKE_PROFIT_MARKET", closeSide, undefined, undefined, {
+            stopPrice: takeProfit,
+            ...sharedNativeParams,
+          }),
+          this.timeoutMs,
+          "BINANCE_FUTURES_CREATE_TP_TIMEOUT"
+        );
+        created.tpOrderId = tp.id ? String(tp.id) : undefined;
+      }
+      mode = "native";
+    } catch {
+      mode = "fallback";
+      if (stopLoss) {
+        const sl = await withTimeout(
+          client.createOrder(symbol, "market", closeSide, amount, undefined, {
+            recvWindow: this.recvWindow,
+            triggerPrice: stopLoss,
+            ...(hedgeMode ? { positionSide } : { reduceOnly: true }),
+          }),
+          this.timeoutMs,
+          "BINANCE_FUTURES_CREATE_SL_FALLBACK_TIMEOUT"
+        );
+        created.slOrderId = sl.id ? String(sl.id) : undefined;
+      }
+      if (takeProfit) {
+        const tp = await withTimeout(
+          client.createOrder(symbol, "market", closeSide, amount, undefined, {
+            recvWindow: this.recvWindow,
+            triggerPrice: takeProfit,
+            ...(hedgeMode ? { positionSide } : { reduceOnly: true }),
+          }),
+          this.timeoutMs,
+          "BINANCE_FUTURES_CREATE_TP_FALLBACK_TIMEOUT"
+        );
+        created.tpOrderId = tp.id ? String(tp.id) : undefined;
+      }
+    }
+    return { mode, slOrderId: created.slOrderId, tpOrderId: created.tpOrderId };
+  }
+
+  private startProtectionMonitor(): void {
+    if (!this.protectionStore || this.monitorTimer) return;
+    this.monitorTimer = setInterval(() => {
+      void this.monitorProtectionGroups();
+    }, 5000);
+    this.monitorTimer.unref();
+  }
+
+  private async monitorProtectionGroups(): Promise<void> {
+    if (!this.protectionStore) return;
+    const started = Date.now();
+    const nowIso = new Date().toISOString();
+    try {
+      const pendingRows = this.protectionStore
+        .listByStatuses(["pending_parent"], 200)
+        .filter((row) => row.scope === "usdm" || row.scope === "coinm");
+      for (const row of pendingRows) {
+        const scope = row.scope as FuturesScope;
+        try {
+          const parent = await this.getClient(scope).fetchOrder(row.parentOrderId, row.symbol, { recvWindow: this.recvWindow });
+          const status = String(parent.status ?? "").toLowerCase();
+          const filled = asNum(parent.filled);
+          if (status === "closed" || filled > 0) {
+            const amount = filled > 0 ? filled : asNum(parent.amount);
+            if (!(amount > 0)) {
+              this.protectionStore.markError(row.id, "FUTURES_PROTECTION_AMOUNT_UNKNOWN");
+              continue;
+            }
+            const created = await this.createFuturesProtectionOrders(scope, row.symbol, row.parentSide, amount, row.slPrice, row.tpPrice);
+            this.protectionStore.markActive(row.id, {
+              mode: created.mode,
+              slOrderId: created.slOrderId,
+              tpOrderId: created.tpOrderId,
+            });
+          } else if (["canceled", "cancelled", "expired", "rejected"].includes(status)) {
+            this.protectionStore.markClosed(row.id);
+          }
+        } catch (error) {
+          this.protectionStore.markError(row.id, String(error));
+        }
+      }
+
+      const activeRows = this.protectionStore
+        .listByStatuses(["active"], 200)
+        .filter((row) => row.scope === "usdm" || row.scope === "coinm");
+      for (const row of activeRows) {
+        const scope = row.scope as FuturesScope;
+        try {
+          if (!row.slOrderId && !row.tpOrderId) {
+            this.protectionStore.markError(row.id, "FUTURES_PROTECTION_ORPHAN");
+            continue;
+          }
+          const slStatus = row.slOrderId
+            ? await this.getClient(scope).fetchOrder(row.slOrderId, row.symbol, { recvWindow: this.recvWindow })
+            : undefined;
+          const tpStatus = row.tpOrderId
+            ? await this.getClient(scope).fetchOrder(row.tpOrderId, row.symbol, { recvWindow: this.recvWindow })
+            : undefined;
+          const slClosed = slStatus ? ["closed", "filled"].includes(String(slStatus.status ?? "").toLowerCase()) : false;
+          const tpClosed = tpStatus ? ["closed", "filled"].includes(String(tpStatus.status ?? "").toLowerCase()) : false;
+          if (slClosed && row.tpOrderId) {
+            await this.getClient(scope).cancelOrder(row.tpOrderId, row.symbol, { recvWindow: this.recvWindow });
+            await this.telemetrySink.emitMetric({
+              name: "protection_pair_cancel_success",
+              value: 1,
+              timestamp: nowIso,
+              tags: this.tags("futures_protection_pair_cancel", { scope, symbol: row.symbol }),
+            });
+            this.protectionStore.markClosed(row.id);
+          } else if (tpClosed && row.slOrderId) {
+            await this.getClient(scope).cancelOrder(row.slOrderId, row.symbol, { recvWindow: this.recvWindow });
+            await this.telemetrySink.emitMetric({
+              name: "protection_pair_cancel_success",
+              value: 1,
+              timestamp: nowIso,
+              tags: this.tags("futures_protection_pair_cancel", { scope, symbol: row.symbol }),
+            });
+            this.protectionStore.markClosed(row.id);
+          }
+        } catch (error) {
+          await this.telemetrySink.emitMetric({
+            name: "protection_pair_cancel_failure",
+            value: 1,
+            timestamp: nowIso,
+            tags: this.tags("futures_protection_pair_cancel", { scope, symbol: row.symbol }),
+          });
+          this.protectionStore.markError(row.id, String(error));
+        }
+      }
+
+      await this.telemetrySink.emitMetric({
+        name: "protection_monitor_cycle_latency_ms",
+        value: Date.now() - started,
+        timestamp: nowIso,
+        tags: this.tags("futures_protection_monitor"),
+      });
+    } catch (error) {
+      await this.telemetrySink.emitAlert({
+        timestamp: nowIso,
+        name: "futures_protection_monitor_failed",
+        severity: "warning",
+        trace_id: this.lastTraceId,
+        tags: this.tags("futures_protection_monitor"),
+        message: String(error),
+      });
     }
   }
 

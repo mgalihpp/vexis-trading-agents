@@ -14,7 +14,10 @@ Pipeline:
 - Binance account snapshot integration (spot + USD-M + COIN-M).
 - Binance Spot CCXT action pack (live actions, whitelist guarded).
 - Binance Futures CCXT action pack (USD-M + COIN-M, leverage/margin/position pre-setup).
+- SL/TP protection across Spot, USD-M, COIN-M (native-first + fallback trigger strategy).
+- Manual protect-position flows for existing spot/futures positions.
 - Observability stack (metrics/logs/alerts, SQLite persistence, health endpoints).
+- Standalone metrics dashboard (`/metricsz`) with interactive start/stop from CLI.
 - Continuous runner with interval + candle alignment + backoff.
 - Unified CLI (`vexis`) with interactive mode.
 
@@ -94,7 +97,9 @@ Spot commands:
 
 ```bash
 vexis spot buy --symbol BTC/USDT --type market --amount 0.001
+vexis spot buy --symbol BTC/USDT --type market --amount 0.001 --stop-loss 93000 --take-profit 98000
 vexis spot sell --symbol BTC/USDT --type limit --amount 0.001 --price 90000
+vexis spot protect --symbol BTC/USDT --amount 0.001 --stop-loss 93000 --take-profit 98000
 vexis spot order get --symbol BTC/USDT --order-id <id>
 vexis spot order cancel --symbol BTC/USDT --order-id <id>
 vexis spot order cancel-all [--symbol BTC/USDT]
@@ -109,7 +114,10 @@ Futures commands:
 
 ```bash
 vexis futures buy --scope usdm --symbol BTC/USDT:USDT --type market --amount 0.001
+vexis futures buy --scope usdm --symbol BTC/USDT:USDT --type market --amount 0.001 --stop-loss 93000 --take-profit 98000
 vexis futures sell --scope usdm --symbol BTC/USDT:USDT --type limit --amount 0.001 --price 90000
+vexis futures protect --scope usdm --symbol BTC/USDT:USDT --side buy --amount 0.001 --stop-loss 93000 --take-profit 98000
+vexis futures protect --scope coinm --symbol SOL/USD:SOL --side buy --amount 1 --take-profit 100
 vexis futures order get --scope usdm --symbol BTC/USDT:USDT --order-id <id>
 vexis futures order cancel --scope usdm --symbol BTC/USDT:USDT --order-id <id>
 vexis futures order cancel-all --scope usdm [--symbol BTC/USDT:USDT]
@@ -137,7 +145,7 @@ vexis --env-file ./secrets/prod.env run --mode paper
 - `Trading Cycle`: run cycle / start runner
 - `Spot Desk`: buy, sell, order ops, balance, trades, quote
 - `Futures Desk`: buy, sell, order ops, balance, positions, trades, quote
-- `Ops & Health`: ops tail, health check, account check
+- `Ops & Health`: ops tail, health check, dashboard start/stop, account check
 - `Admin`: doctor, env check, validate
 
 UX behavior:
@@ -145,6 +153,7 @@ UX behavior:
 - loading indicator + elapsed time on each action
 - symbol and numeric input validation
 - back navigation on each submenu
+- dashboard server in interactive mode is non-blocking and toggles menu option between Start/Stop
 
 ## Configuration
 
@@ -262,12 +271,20 @@ Health endpoints:
 
 - `GET /healthz` liveness
 - `GET /readyz` readiness snapshot (providers/LLM/runner)
+- `GET /metricsz` HTML metrics dashboard
+- `GET /metricsz/data` JSON feed for dashboard data
 
 Ops tail:
 
 ```bash
 npm run ops:tail -- --run-id run-123 --severity critical --limit 50
 npm run ops:tail -- --trace-id <trace-id> --since 2026-03-05T00:00:00.000Z --json
+```
+
+Run standalone dashboard server (without runner):
+
+```bash
+node dist/cli.js health --serve --port 8787
 ```
 
 ## Safety Notes

@@ -371,7 +371,60 @@ export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => 
     },
     monitor: healthMonitor,
     getRunnerState: () => runnerStateSnapshot,
-    getLastRun: () => healthMonitor.getLastRunSample()
+    getLastRun: () => healthMonitor.getLastRunSample(),
+    getMetricsView: (limit = 500) => {
+      if (sqliteSink) {
+        return {
+          metrics: sqliteSink.getMetrics({ limit }),
+          summary: sqliteSink.getMetricSummary(500),
+          alerts: sqliteSink.getAlerts({ limit: Math.max(50, Math.min(limit, 1000)) }),
+        };
+      }
+      const metrics = memorySink.getMetrics().slice(-Math.max(1, limit)).reverse().map((m) => ({
+        name: m.name,
+        value: m.value,
+        timestamp: m.timestamp,
+        tags: m.tags as Record<string, unknown>,
+        run_id: typeof m.tags.run_id === "string" ? m.tags.run_id : undefined,
+        trace_id: typeof m.tags.trace_id === "string" ? m.tags.trace_id : undefined,
+        mode: typeof m.tags.mode === "string" ? m.tags.mode : undefined,
+        asset: typeof m.tags.asset === "string" ? m.tags.asset : undefined,
+        node: typeof m.tags.node === "string" ? m.tags.node : undefined,
+        provider: typeof m.tags.provider === "string" ? m.tags.provider : undefined,
+        source: typeof m.tags.source === "string" ? m.tags.source : undefined,
+      }));
+      const grouped = new Map<string, number[]>();
+      const latest = new Map<string, { value: number; timestamp: string }>();
+      for (const row of metrics) {
+        const arr = grouped.get(row.name) ?? [];
+        arr.push(row.value);
+        grouped.set(row.name, arr);
+        if (!latest.has(row.name)) {
+          latest.set(row.name, { value: row.value, timestamp: row.timestamp });
+        }
+      }
+      const summary = [...grouped.entries()].map(([name, vals]) => {
+        const min = Math.min(...vals);
+        const max = Math.max(...vals);
+        const avg = vals.reduce((a, b) => a + b, 0) / Math.max(vals.length, 1);
+        const last = latest.get(name)!;
+        return {
+          name,
+          samples: vals.length,
+          min,
+          max,
+          avg,
+          latest_timestamp: last.timestamp,
+          latest_value: last.value,
+        };
+      }).sort((a, b) => b.latest_timestamp.localeCompare(a.latest_timestamp));
+
+      return {
+        metrics,
+        summary,
+        alerts: memorySink.getAlerts().slice(-Math.max(50, Math.min(limit, 1000))).reverse(),
+      };
+    }
   });
   await healthServer.start();
 

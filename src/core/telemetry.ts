@@ -103,6 +103,38 @@ export interface AlertQuery {
   limit?: number;
 }
 
+export interface MetricQuery {
+  sinceIso?: string;
+  name?: string;
+  runId?: string;
+  traceId?: string;
+  limit?: number;
+}
+
+export interface MetricRecord {
+  name: string;
+  value: number;
+  timestamp: string;
+  tags: Record<string, unknown>;
+  run_id?: string;
+  trace_id?: string;
+  mode?: string;
+  asset?: string;
+  node?: string;
+  provider?: string;
+  source?: string;
+}
+
+export interface MetricSummaryRow {
+  name: string;
+  samples: number;
+  min: number;
+  max: number;
+  avg: number;
+  latest_timestamp: string;
+  latest_value: number;
+}
+
 export interface PurgeResult {
   decisionLogsDeleted: number;
   telemetryLogsDeleted: number;
@@ -263,6 +295,87 @@ export class SqliteTelemetrySink implements TelemetrySink {
       node: row.node ? String(row.node) : undefined,
       provider: row.provider ? String(row.provider) : undefined,
       last_successful_run: row.last_successful_run ? String(row.last_successful_run) : undefined
+    }));
+  }
+
+  public getMetrics(query: MetricQuery = {}): MetricRecord[] {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (query.sinceIso) {
+      where.push("timestamp >= ?");
+      params.push(query.sinceIso);
+    }
+    if (query.name) {
+      where.push("name = ?");
+      params.push(query.name);
+    }
+    if (query.runId) {
+      where.push("run_id = ?");
+      params.push(query.runId);
+    }
+    if (query.traceId) {
+      where.push("trace_id = ?");
+      params.push(query.traceId);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const limitSql = query.limit && query.limit > 0 ? "LIMIT ?" : "";
+    if (limitSql) {
+      params.push(query.limit);
+    }
+
+    const rows = this.db.prepare(`
+      SELECT name, value, timestamp, tags_json, run_id, trace_id, mode, asset, node, provider, source
+      FROM telemetry_metrics
+      ${whereSql}
+      ORDER BY timestamp DESC, id DESC
+      ${limitSql}
+    `).all(...params) as Array<Record<string, unknown>>;
+
+    return rows.map((row) => ({
+      name: String(row.name),
+      value: Number(row.value),
+      timestamp: String(row.timestamp),
+      tags: JSON.parse(String(row.tags_json)),
+      run_id: row.run_id ? String(row.run_id) : undefined,
+      trace_id: row.trace_id ? String(row.trace_id) : undefined,
+      mode: row.mode ? String(row.mode) : undefined,
+      asset: row.asset ? String(row.asset) : undefined,
+      node: row.node ? String(row.node) : undefined,
+      provider: row.provider ? String(row.provider) : undefined,
+      source: row.source ? String(row.source) : undefined,
+    }));
+  }
+
+  public getMetricSummary(limit = 200): MetricSummaryRow[] {
+    const rows = this.db.prepare(`
+      SELECT
+        m.name AS name,
+        COUNT(*) AS samples,
+        MIN(m.value) AS min,
+        MAX(m.value) AS max,
+        AVG(m.value) AS avg,
+        MAX(m.timestamp) AS latest_timestamp,
+        (
+          SELECT m2.value
+          FROM telemetry_metrics m2
+          WHERE m2.name = m.name
+          ORDER BY m2.timestamp DESC, m2.id DESC
+          LIMIT 1
+        ) AS latest_value
+      FROM telemetry_metrics m
+      GROUP BY m.name
+      ORDER BY latest_timestamp DESC
+      LIMIT ?
+    `).all(Math.max(1, limit)) as Array<Record<string, unknown>>;
+
+    return rows.map((row) => ({
+      name: String(row.name),
+      samples: Number(row.samples),
+      min: Number(row.min),
+      max: Number(row.max),
+      avg: Number(row.avg),
+      latest_timestamp: String(row.latest_timestamp),
+      latest_value: Number(row.latest_value),
     }));
   }
 

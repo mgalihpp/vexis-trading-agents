@@ -82,6 +82,28 @@ const initSchema = (db: Database.Database): void => {
     CREATE INDEX IF NOT EXISTS idx_telemetry_alerts_trace ON telemetry_alerts(trace_id);
     CREATE INDEX IF NOT EXISTS idx_telemetry_alerts_severity ON telemetry_alerts(severity);
     CREATE INDEX IF NOT EXISTS idx_telemetry_alerts_run_trace_time ON telemetry_alerts(run_id, trace_id, timestamp);
+
+    CREATE TABLE IF NOT EXISTS protection_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      parent_order_id TEXT NOT NULL,
+      parent_side TEXT NOT NULL,
+      parent_type TEXT NOT NULL,
+      sl_price REAL,
+      tp_price REAL,
+      sl_order_id TEXT,
+      tp_order_id TEXT,
+      mode TEXT,
+      status TEXT NOT NULL,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(scope, symbol, parent_order_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_protection_groups_status ON protection_groups(status);
+    CREATE INDEX IF NOT EXISTS idx_protection_groups_scope_symbol ON protection_groups(scope, symbol);
   `);
 };
 
