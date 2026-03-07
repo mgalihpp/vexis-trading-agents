@@ -326,13 +326,15 @@ export interface AnalystBundle {
 }
 
 export interface BullishResearch {
-  bullish_arguments: string[];
-  reward_estimate_pct: number;
+  arguments: string[];
+  risk_or_reward_estimate_pct: number;
+  failure_modes: string[];
   confidence: number;
 }
 
 export interface BearishResearch {
-  bearish_arguments: string[];
+  arguments: string[];
+  risk_or_reward_estimate_pct: number;
   failure_modes: string[];
   confidence: number;
 }
@@ -512,7 +514,6 @@ export interface BinanceAccountSnapshot {
 export interface CliGlobalOptions {
   json?: boolean;
   output?: OutputFormat;
-  mode?: PipelineMode;
   envFile?: string;
 }
 

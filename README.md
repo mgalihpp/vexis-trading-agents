@@ -68,7 +68,7 @@ Single cycle:
 ```bash
 npm start
 # or
-node dist/cli.js run --mode paper --asset SOL/USDT --timeframe 1h --limit 50
+node dist/cli.js run --asset SOL/USDT --timeframe 1h --limit 50
 ```
 
 Interactive console:
@@ -135,7 +135,7 @@ Use custom env file per command:
 
 ```bash
 vexis --env-file ./secrets/prod.env env check
-vexis --env-file ./secrets/prod.env run --mode paper
+vexis --env-file ./secrets/prod.env run
 ```
 
 ## Interactive UX

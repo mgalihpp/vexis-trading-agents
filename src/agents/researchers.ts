@@ -17,30 +17,40 @@ export class BullishResearcher extends BaseAgent<AnalystBundle, BullishResearch>
   }
 
   public async run(input: AnalystBundle, ctx: AgentContext): Promise<BullishResearch> {
-    const args: string[] = [];
+    const argumentsList: string[] = [];
+    const failureModes: string[] = [];
 
     if (input.fundamentals.intrinsic_valuation_bias === "undervalued") {
-      args.push("Valuation appears discounted relative to growth profile.");
+      argumentsList.push("Valuation appears discounted relative to growth profile.");
+    } else if (input.fundamentals.intrinsic_valuation_bias === "overvalued") {
+      failureModes.push("Overvaluation risk can cap upside follow-through.");
     }
     if (input.sentiment.sentiment_score > 0) {
-      args.push("Market sentiment leans risk-on.");
+      argumentsList.push("Market sentiment leans risk-on.");
+    } else if (input.sentiment.sentiment_score < 0) {
+      failureModes.push("Sentiment reversal can invalidate bullish continuation.");
     }
     if (input.technical.signals.direction === "buy") {
-      args.push("Technical setup aligns with momentum continuation.");
+      argumentsList.push("Technical setup aligns with momentum continuation.");
+    } else if (input.technical.signals.direction === "sell") {
+      failureModes.push("Momentum breakdown can trigger downside acceleration.");
     }
     if (input.news.event_impact !== "bearish") {
-      args.push("News flow is not structurally negative.");
+      argumentsList.push("News flow is not structurally negative.");
+    } else {
+      failureModes.push("Bearish headline shocks can break bullish thesis.");
     }
 
-    const reward_estimate_pct = round(
+    const riskOrRewardEstimatePct = round(
       clamp(2 + input.technical.signals.calibrated_probability * 6 + input.sentiment.confidence * 3, 1, 15),
       3
     );
 
     const output: BullishResearch = {
-      bullish_arguments: args,
-      reward_estimate_pct,
-      confidence: round(clamp(0.35 + args.length * 0.12, 0.2, 0.9), 3)
+      arguments: argumentsList,
+      risk_or_reward_estimate_pct: riskOrRewardEstimatePct,
+      failure_modes: failureModes,
+      confidence: round(clamp(0.35 + argumentsList.length * 0.12, 0.2, 0.9), 3)
     };
 
     await this.logDecision(ctx, input, output, "Built upside thesis from valuation, sentiment, technicals and event backdrop.");
@@ -56,30 +66,36 @@ export class BearishResearcher extends BaseAgent<AnalystBundle, BearishResearch>
   }
 
   public async run(input: AnalystBundle, ctx: AgentContext): Promise<BearishResearch> {
-    const bearish_arguments: string[] = [];
-    const failure_modes: string[] = [];
+    const argumentsList: string[] = [];
+    const failureModes: string[] = [];
 
     if (input.fundamentals.red_flags.length > 0) {
-      bearish_arguments.push("Balance-sheet and quality red flags remain unresolved.");
-      failure_modes.push("Fundamental deterioration triggers repricing.");
+      argumentsList.push("Balance-sheet and quality red flags remain unresolved.");
+      failureModes.push("Fundamental deterioration triggers repricing.");
     }
     if (input.news.event_impact === "bearish") {
-      bearish_arguments.push("Negative event cluster increases downside tail risk.");
-      failure_modes.push("Policy headline shock drives gap-down move.");
+      argumentsList.push("Negative event cluster increases downside tail risk.");
+      failureModes.push("Policy headline shock drives gap-down move.");
     }
     if (input.technical.signals.direction === "sell") {
-      bearish_arguments.push("Momentum profile warns of trend exhaustion.");
-      failure_modes.push("Support breach accelerates liquidations.");
+      argumentsList.push("Momentum profile warns of trend exhaustion.");
+      failureModes.push("Support breach accelerates liquidations.");
     }
     if (input.sentiment.mood === "fearful") {
-      bearish_arguments.push("Sentiment regime indicates fragile demand.");
-      failure_modes.push("Risk-off flow suppresses rebounds.");
+      argumentsList.push("Sentiment regime indicates fragile demand.");
+      failureModes.push("Risk-off flow suppresses rebounds.");
     }
 
+    const riskOrRewardEstimatePct = round(
+      clamp(2 + input.technical.signals.calibrated_probability * 6 + input.sentiment.confidence * 3, 1, 15),
+      3
+    );
+
     const output: BearishResearch = {
-      bearish_arguments,
-      failure_modes,
-      confidence: round(clamp(0.3 + bearish_arguments.length * 0.14, 0.2, 0.9), 3)
+      arguments: argumentsList,
+      risk_or_reward_estimate_pct: riskOrRewardEstimatePct,
+      failure_modes: failureModes,
+      confidence: round(clamp(0.3 + argumentsList.length * 0.14, 0.2, 0.9), 3)
     };
 
     await this.logDecision(ctx, input, output, "Stress-tested assumptions and enumerated principal downside failure modes.");
@@ -98,15 +114,15 @@ export class DebateSynthesizer extends BaseAgent<{ bullish: BullishResearch; bea
     input: { bullish: BullishResearch; bearish: BearishResearch },
     ctx: AgentContext
   ): Promise<DebateOutput> {
-    const bullishScore = input.bullish.bullish_arguments.length * 0.2 + input.bullish.confidence;
-    const bearishScore = input.bearish.bearish_arguments.length * 0.2 + input.bearish.confidence;
+    const bullishScore = input.bullish.arguments.length * 0.2 + input.bullish.confidence;
+    const bearishScore = input.bearish.arguments.length * 0.2 + input.bearish.confidence;
     const diff = bullishScore - bearishScore;
 
     const final_bias = diff > 0.2 ? "bullish" : diff < -0.2 ? "bearish" : "neutral";
 
     const output: DebateOutput = {
-      bullish_arguments: input.bullish.bullish_arguments,
-      bearish_arguments: input.bearish.bearish_arguments,
+      bullish_arguments: input.bullish.arguments,
+      bearish_arguments: input.bearish.arguments,
       final_bias,
       confidence: round(clamp(0.45 + Math.abs(diff) * 0.2, 0.2, 0.95), 3)
     };

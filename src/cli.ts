@@ -276,7 +276,6 @@ const normalizeGlobalOptions = (command: Command): CliGlobalOptions => {
   return {
     json: Boolean(raw.json),
     output: parseOutput(typeof raw.output === "string" ? raw.output : undefined),
-    mode: parseMode(typeof raw.mode === "string" ? raw.mode : undefined),
     envFile: typeof raw.envFile === "string" ? raw.envFile : undefined
   };
 };
@@ -367,7 +366,7 @@ const resolveRuntimeConfig = (
   const outputFromEnv = parseOutput(meta.resolvedValues.OUTPUT_FORMAT) ?? "pretty";
 
   const effective: Record<string, JSONValue> = {
-    mode: global.mode ?? modeFromEnv,
+    mode: modeFromEnv,
     output: global.output ?? outputFromEnv,
     env_file: global.envFile ?? "",
     env_files_loaded: meta.loadedFiles,
@@ -400,7 +399,7 @@ const resolveRuntimeConfig = (
   };
 
   const source: Record<string, "flag" | "env" | "default"> = {
-    mode: global.mode ? "flag" : envOrDefault("PIPELINE_MODE"),
+    mode: envOrDefault("PIPELINE_MODE"),
     output: global.output ? "flag" : envOrDefault("OUTPUT_FORMAT"),
     env_file: global.envFile ? "flag" : "default",
     env_files_loaded: meta.loadedFiles.length > 0 ? "env" : "default",
@@ -1060,7 +1059,6 @@ const toRunOverrides = (
   options: CommonRunOptions,
   extra?: Partial<AppRunOverrides>
 ): AppRunOverrides => ({
-  mode: global.mode,
   outputFormat: global.output ?? (global.json ? "json" : undefined),
   envFile: global.envFile,
   showTelemetry: options.showTelemetry,
@@ -1709,7 +1707,6 @@ program
   .description("Vexis trading desk CLI")
   .option("--json", "JSON output")
   .option("--output <format>", "Output format: pretty|json")
-  .option("--mode <mode>", "Pipeline mode: backtest|paper|live-sim")
   .option("--env-file <path>", "Custom env file path (lower precedence than OS env)")
   .showHelpAfterError();
 
