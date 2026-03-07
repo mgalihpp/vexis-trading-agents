@@ -1,5 +1,4 @@
 import ccxt, { type Exchange } from "ccxt";
-import path from "node:path";
 import { createRequire } from "node:module";
 import backtestCandles from "../../data/backtest-candles.json";
 import type {
@@ -61,8 +60,7 @@ interface CryptoNewsClient {
 
 const requireFromEsm = createRequire(import.meta.url);
 const createCryptoNewsClient = (baseUrl: string, timeout: number, fetchFn: typeof fetch): CryptoNewsClient => {
-  const sdkPath = path.resolve(process.cwd(), "node_modules", "@nirholas", "crypto-news", "dist", "index.cjs");
-  const sdk = requireFromEsm(sdkPath) as {
+  const sdk = requireFromEsm("@nirholas/crypto-news") as {
     CryptoNews: new (options?: { baseUrl?: string; timeout?: number; fetch?: typeof fetch }) => CryptoNewsClient;
   };
   return new sdk.CryptoNews({
