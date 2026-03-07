@@ -376,7 +376,7 @@ export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => 
       if (sqliteSink) {
         return {
           metrics: sqliteSink.getMetrics({ limit }),
-          summary: sqliteSink.getMetricSummary(500),
+          summary: sqliteSink.getMetricSummary(Math.max(1, limit)),
           alerts: sqliteSink.getAlerts({ limit: Math.max(50, Math.min(limit, 1000)) }),
         };
       }

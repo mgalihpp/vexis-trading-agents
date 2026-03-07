@@ -308,6 +308,7 @@ const getSpotService = (runtime: RuntimeConfig, mode: PipelineMode): BinanceSpot
   const telemetrySink = runtime.obsPersistEnabled
     ? new SqliteTelemetrySink(runtime.obsSqlitePath)
     : new InMemoryTelemetrySink(false);
+  const protectionDbPath = runtime.obsPersistEnabled ? runtime.obsSqlitePath : undefined;
   return BinanceSpotTradingService.getInstance({
     enabled: runtime.binanceSpotEnabled,
     apiKey: runtime.binanceApiKey,
@@ -316,7 +317,7 @@ const getSpotService = (runtime: RuntimeConfig, mode: PipelineMode): BinanceSpot
     defaultTif: runtime.binanceSpotDefaultTif,
     recvWindow: runtime.binanceSpotRecvWindow,
     timeoutMs: runtime.nodeTimeoutMs,
-    protectionDbPath: runtime.obsSqlitePath,
+    protectionDbPath,
     mode,
     telemetrySink
   });
@@ -334,6 +335,7 @@ const getFuturesService = (runtime: RuntimeConfig, mode: PipelineMode): BinanceF
   const telemetrySink = runtime.obsPersistEnabled
     ? new SqliteTelemetrySink(runtime.obsSqlitePath)
     : new InMemoryTelemetrySink(false);
+  const protectionDbPath = runtime.obsPersistEnabled ? runtime.obsSqlitePath : undefined;
   return BinanceFuturesTradingService.getInstance({
     enabled: runtime.binanceFuturesEnabled,
     apiKey: runtime.binanceApiKey,
@@ -346,7 +348,7 @@ const getFuturesService = (runtime: RuntimeConfig, mode: PipelineMode): BinanceF
     defaultLeverage: runtime.binanceFuturesDefaultLeverage,
     marginMode: runtime.binanceFuturesMarginMode,
     positionMode: runtime.binanceFuturesPositionMode,
-    protectionDbPath: runtime.obsSqlitePath,
+    protectionDbPath,
     mode,
     telemetrySink
   });
@@ -1017,7 +1019,13 @@ const doFuturesProtect = async (
 ): Promise<CliCommandResult> => {
   const service = getFuturesService(runtime, mode);
   const scope = normalizeFuturesScope(runtime, options.scope);
-  const side = options.side === "sell" ? "sell" : "buy";
+  if (!(options.side === "buy" || options.side === "sell")) {
+    return {
+      exitCode: 1,
+      message: `invalid futures side '${String(options.side)}'; expected 'buy' or 'sell'`,
+    };
+  }
+  const side: "buy" | "sell" = options.side;
   const summary = await service.armProtectionManual(
     {
       scope,
@@ -1117,18 +1125,18 @@ const runSpotInteractive = async (
     const choice = await select({
       message: "Spot Desk",
       choices: [
-        { name: "ðŸŸ¢ Buy", value: "buy" },
-        { name: "ðŸ”´ Sell", value: "sell" },
-        { name: "ðŸ”Ž Order Get", value: "order-get" },
-        { name: "âŒ Order Cancel", value: "order-cancel" },
-        { name: "ðŸ§¹ Order Cancel All", value: "order-cancel-all" },
-        { name: "ðŸ“‚ Orders Open", value: "orders-open" },
-        { name: "ðŸ“ Orders Closed", value: "orders-closed" },
-        { name: "ðŸ’° Balance", value: "balance" },
-        { name: "ðŸ“œ Trades", value: "trades" },
-        { name: "ðŸ“ˆ Quote", value: "quote" },
-        { name: "ðŸ›¡ï¸ Protect Position", value: "protect" },
-        { name: "â¬…ï¸ Back", value: "back" }
+        { name: "\u{1F7E2} Buy", value: "buy" },
+        { name: "\u{1F534} Sell", value: "sell" },
+        { name: "\u{1F50E} Order Get", value: "order-get" },
+        { name: "\u{274C} Order Cancel", value: "order-cancel" },
+        { name: "\u{1F9F9} Order Cancel All", value: "order-cancel-all" },
+        { name: "\u{1F4C2} Orders Open", value: "orders-open" },
+        { name: "\u{1F4C1} Orders Closed", value: "orders-closed" },
+        { name: "\u{1F4B0} Balance", value: "balance" },
+        { name: "\u{1F4DC} Trades", value: "trades" },
+        { name: "\u{1F4C8} Quote", value: "quote" },
+        { name: "\u{1F6E1}\u{FE0F} Protect Position", value: "protect" },
+        { name: "\u{2B05}\u{FE0F} Back", value: "back" }
       ]
     });
 
@@ -1263,8 +1271,8 @@ const promptFuturesScope = async (fallback: FuturesScope): Promise<FuturesScope>
   (await select({
     message: "Futures scope",
     choices: [
-      { name: "ðŸ’µ USD-M", value: "usdm" },
-      { name: "ðŸª™ COIN-M", value: "coinm" }
+      { name: "\u{1F4B5} USD-M", value: "usdm" },
+      { name: "\u{1FA99} COIN-M", value: "coinm" }
     ],
     default: fallback
   })) as FuturesScope;
@@ -1279,19 +1287,19 @@ const runFuturesInteractive = async (
     const choice = await select({
       message: "Futures Desk",
       choices: [
-        { name: "ðŸŸ¢ Buy", value: "buy" },
-        { name: "ðŸ”´ Sell", value: "sell" },
-        { name: "ðŸ”Ž Order Get", value: "order-get" },
-        { name: "âŒ Order Cancel", value: "order-cancel" },
-        { name: "ðŸ§¹ Order Cancel All", value: "order-cancel-all" },
-        { name: "ðŸ“‚ Orders Open", value: "orders-open" },
-        { name: "ðŸ“ Orders Closed", value: "orders-closed" },
-        { name: "ðŸ’° Balance", value: "balance" },
-        { name: "ðŸ“Œ Positions", value: "positions" },
-        { name: "ðŸ“œ Trades", value: "trades" },
-        { name: "ðŸ“ˆ Quote", value: "quote" },
-        { name: "ðŸ›¡ï¸ Protect Position", value: "protect" },
-        { name: "â¬…ï¸ Back", value: "back" }
+        { name: "\u{1F7E2} Buy", value: "buy" },
+        { name: "\u{1F534} Sell", value: "sell" },
+        { name: "\u{1F50E} Order Get", value: "order-get" },
+        { name: "\u{274C} Order Cancel", value: "order-cancel" },
+        { name: "\u{1F9F9} Order Cancel All", value: "order-cancel-all" },
+        { name: "\u{1F4C2} Orders Open", value: "orders-open" },
+        { name: "\u{1F4C1} Orders Closed", value: "orders-closed" },
+        { name: "\u{1F4B0} Balance", value: "balance" },
+        { name: "\u{1F4CC} Positions", value: "positions" },
+        { name: "\u{1F4DC} Trades", value: "trades" },
+        { name: "\u{1F4C8} Quote", value: "quote" },
+        { name: "\u{1F6E1}\u{FE0F} Protect Position", value: "protect" },
+        { name: "\u{2B05}\u{FE0F} Back", value: "back" }
       ]
     });
 
@@ -1414,8 +1422,8 @@ const runFuturesInteractive = async (
         const side = (await select({
           message: "Parent side (existing position direction)",
           choices: [
-            { name: "ðŸŸ¢ Buy/Long", value: "buy" },
-            { name: "ðŸ”´ Sell/Short", value: "sell" }
+            { name: "\u{1F7E2} Buy/Long", value: "buy" },
+            { name: "\u{1F534} Sell/Short", value: "sell" }
           ]
         })) as "buy" | "sell";
         const amount = await promptFloat("Amount to protect (contracts or base coin)", 0.001);
@@ -1449,12 +1457,12 @@ const runInteractive = async (command: Command): Promise<void> => {
     const choice = await select({
       message: "Main menu",
       choices: [
-        { name: "ðŸ” Trading Cycle", value: "trading" },
-        { name: "ðŸ’¹ Spot Desk", value: "spot" },
-        { name: "ðŸ“Š Futures Desk", value: "futures" },
-        { name: "ðŸ©º Ops & Health", value: "ops" },
-        { name: "âš™ï¸ Admin", value: "admin" },
-        { name: "ðŸšª Exit", value: "exit" }
+        { name: "\u{1F501} Trading Cycle", value: "trading" },
+        { name: "\u{1F4B9} Spot Desk", value: "spot" },
+        { name: "\u{1F4CA} Futures Desk", value: "futures" },
+        { name: "\u{1FA7A} Ops & Health", value: "ops" },
+        { name: "\u{2699}\u{FE0F} Admin", value: "admin" },
+        { name: "\u{1F6AA} Exit", value: "exit" }
       ]
     });
 
@@ -1467,9 +1475,9 @@ const runInteractive = async (command: Command): Promise<void> => {
       const action = await select({
         message: "Trading actions",
         choices: [
-          { name: "â–¶ï¸ Run one cycle", value: "run" },
-          { name: "â±ï¸ Start runner", value: "runner" },
-          { name: "â¬…ï¸ Back", value: "back" }
+          { name: "\u{25B6}\u{FE0F} Run one cycle", value: "run" },
+          { name: "\u{23F1}\u{FE0F} Start runner", value: "runner" },
+          { name: "\u{2B05}\u{FE0F} Back", value: "back" }
         ]
       });
       if (action === "back") continue;
@@ -1530,13 +1538,13 @@ const runInteractive = async (command: Command): Promise<void> => {
         const opsAction = await select({
           message: "Ops & Health",
           choices: [
-            { name: "🧾 Ops tail", value: "ops-tail" },
-            { name: "🩺 Health check", value: "health" },
+            { name: "\u{1F9FE} Ops tail", value: "ops-tail" },
+            { name: "\u{1FA7A} Health check", value: "health" },
             dashboardHandle
-              ? { name: `🛑 Stop dashboard server (port ${dashboardHandle.port})`, value: "health-serve-stop" }
-              : { name: "📊 Start dashboard server", value: "health-serve-start" },
-            { name: "👛 Account check", value: "account-check" },
-            { name: "⬅️ Back", value: "back" }
+              ? { name: `\u{1F6D1} Stop dashboard server (port ${dashboardHandle.port})`, value: "health-serve-stop" }
+              : { name: "\u{1F4CA} Start dashboard server", value: "health-serve-start" },
+            { name: "\u{1F45B} Account check", value: "account-check" },
+            { name: "\u{2B05}\u{FE0F} Back", value: "back" }
           ]
         });
         if (opsAction === "back") {
@@ -1629,10 +1637,10 @@ const runInteractive = async (command: Command): Promise<void> => {
       const adminAction = await select({
         message: "Admin",
         choices: [
-          { name: "ðŸ§ª Doctor", value: "doctor" },
-          { name: "ðŸ§­ Env check", value: "env-check" },
-          { name: "âœ… Validate", value: "validate" },
-          { name: "â¬…ï¸ Back", value: "back" }
+          { name: "\u{1F9EA} Doctor", value: "doctor" },
+          { name: "\u{1F9ED} Env check", value: "env-check" },
+          { name: "\u{2705} Validate", value: "validate" },
+          { name: "\u{2B05}\u{FE0F} Back", value: "back" }
         ]
       });
       if (adminAction === "back") continue;

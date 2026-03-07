@@ -145,6 +145,47 @@ const asPositive = (value: unknown): number | undefined => {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 };
 
+const extractErrorCodeAndMessage = (error: unknown): { code: string; message: string } => {
+  const raw = error as { code?: unknown; message?: unknown };
+  const code = String(raw?.code ?? "").toLowerCase();
+  const message = String(raw?.message ?? error ?? "").toLowerCase();
+  return { code, message };
+};
+
+const isNativeProtectionUnsupportedError = (error: unknown): boolean => {
+  const { code, message } = extractErrorCodeAndMessage(error);
+  const haystack = `${code} ${message}`;
+  const mentionsProtectionParams = [
+    "stoplossprice",
+    "takeprofitprice",
+    "stop-loss",
+    "take-profit",
+    "stop loss",
+    "take profit",
+  ].some((token) => haystack.includes(token));
+  const explicitUnsupported = [
+    "unsupported",
+    "not supported",
+    "unknown parameter",
+    "unrecognized parameter",
+    "invalid parameter",
+  ].some((token) => haystack.includes(token));
+  return mentionsProtectionParams && explicitUnsupported;
+};
+
+const isNativeProtectionApplied = (
+  row: CcxtOrder,
+  request: Pick<FuturesOrderRequest, "stopLoss" | "takeProfit">
+): boolean => {
+  if (!(request.stopLoss || request.takeProfit)) return false;
+  const info = (row as { info?: unknown }).info;
+  if (!info || typeof info !== "object") return false;
+  const serialized = JSON.stringify(info).toLowerCase();
+  const slApplied = request.stopLoss ? serialized.includes("stoplossprice") || serialized.includes("stopprice") : true;
+  const tpApplied = request.takeProfit ? serialized.includes("takeprofitprice") || serialized.includes("takeprofit") : true;
+  return slApplied && tpApplied;
+};
+
 const toIso = (row: { datetime?: string; timestamp?: number }): string => {
   if (row.datetime) return String(row.datetime);
   if (typeof row.timestamp === "number") return new Date(row.timestamp).toISOString();
@@ -194,6 +235,7 @@ export class BinanceFuturesTradingService {
   private readonly coinmClient: FuturesClientLike;
   private readonly protectionStore?: ProtectionGroupStore;
   private monitorTimer: NodeJS.Timeout | null = null;
+  private isProtectionMonitorRunning = false;
   private readonly markets = new Map<FuturesScope, Map<string, FuturesMarket>>();
   private readonly scopeSetup = new Map<FuturesScope, Set<string>>();
   private lastRunId = "futures-run";
@@ -274,9 +316,12 @@ export class BinanceFuturesTradingService {
           this.timeoutMs,
           "BINANCE_FUTURES_CREATE_ORDER_TIMEOUT"
         );
-        nativeProtectionApplied = Boolean(normalized.stopLoss || normalized.takeProfit);
+        nativeProtectionApplied = isNativeProtectionApplied(row, normalized);
       } catch (nativeError) {
         if (!(normalized.stopLoss || normalized.takeProfit)) {
+          throw nativeError;
+        }
+        if (!isNativeProtectionUnsupportedError(nativeError)) {
           throw nativeError;
         }
         delete params.stopLossPrice;
@@ -852,7 +897,8 @@ export class BinanceFuturesTradingService {
       );
       px = asNum(ticker.last) || asNum(ticker.bid) || asNum(ticker.ask);
     }
-    const notional = amount * px;
+    const contractSize = asPositive(market.contractSize) ?? 1;
+    const notional = market.inverse ? amount * contractSize : amount * contractSize * px;
     if (notional < minCost) {
       throw new FuturesGuardError(
         "FUTURES_NOTIONAL_BELOW_MIN",
@@ -906,12 +952,19 @@ export class BinanceFuturesTradingService {
     preferredMode: ProtectionModeRecord
   ): Promise<ProtectionSummary | undefined> {
     if (!request.stopLoss && !request.takeProfit) return undefined;
-    if (!this.protectionStore) {
-      throw new FuturesGuardError("FUTURES_PROTECTION_STORE_DISABLED", "Protection requires protectionDbPath configuration.");
-    }
     const parentId = parent.orderId;
     if (!parentId) {
       throw new FuturesGuardError("FUTURES_PARENT_ORDER_ID_MISSING", "Parent order id missing while creating protections.");
+    }
+    if (preferredMode === "native") {
+      return {
+        enabled: true,
+        mode: "native",
+        parentOrderId: parentId,
+      };
+    }
+    if (!this.protectionStore) {
+      throw new FuturesGuardError("FUTURES_PROTECTION_STORE_DISABLED", "Protection requires protectionDbPath configuration.");
     }
     const group = this.protectionStore.upsertPending({
       scope,
@@ -985,7 +1038,7 @@ export class BinanceFuturesTradingService {
     try {
       if (stopLoss) {
         const sl = await withTimeout(
-          client.createOrder(symbol, "STOP_MARKET", closeSide, undefined, undefined, {
+          client.createOrder(symbol, "STOP_MARKET", closeSide, amount, undefined, {
             stopPrice: stopLoss,
             ...sharedNativeParams,
           }),
@@ -996,7 +1049,7 @@ export class BinanceFuturesTradingService {
       }
       if (takeProfit) {
         const tp = await withTimeout(
-          client.createOrder(symbol, "TAKE_PROFIT_MARKET", closeSide, undefined, undefined, {
+          client.createOrder(symbol, "TAKE_PROFIT_MARKET", closeSide, amount, undefined, {
             stopPrice: takeProfit,
             ...sharedNativeParams,
           }),
@@ -1008,7 +1061,7 @@ export class BinanceFuturesTradingService {
       mode = "native";
     } catch {
       mode = "fallback";
-      if (stopLoss) {
+      if (stopLoss && !created.slOrderId) {
         const sl = await withTimeout(
           client.createOrder(symbol, "market", closeSide, amount, undefined, {
             recvWindow: this.recvWindow,
@@ -1020,7 +1073,7 @@ export class BinanceFuturesTradingService {
         );
         created.slOrderId = sl.id ? String(sl.id) : undefined;
       }
-      if (takeProfit) {
+      if (takeProfit && !created.tpOrderId) {
         const tp = await withTimeout(
           client.createOrder(symbol, "market", closeSide, amount, undefined, {
             recvWindow: this.recvWindow,
@@ -1038,10 +1091,25 @@ export class BinanceFuturesTradingService {
 
   private startProtectionMonitor(): void {
     if (!this.protectionStore || this.monitorTimer) return;
-    this.monitorTimer = setInterval(() => {
-      void this.monitorProtectionGroups();
-    }, 5000);
-    this.monitorTimer.unref();
+    const scheduleNext = (): void => {
+      this.monitorTimer = setTimeout(async () => {
+        this.monitorTimer = null;
+        if (!this.protectionStore) return;
+        if (this.isProtectionMonitorRunning) {
+          scheduleNext();
+          return;
+        }
+        this.isProtectionMonitorRunning = true;
+        try {
+          await this.monitorProtectionGroups();
+        } finally {
+          this.isProtectionMonitorRunning = false;
+          scheduleNext();
+        }
+      }, 5000);
+      this.monitorTimer.unref();
+    };
+    scheduleNext();
   }
 
   private async monitorProtectionGroups(): Promise<void> {
@@ -1058,8 +1126,10 @@ export class BinanceFuturesTradingService {
           const parent = await this.getClient(scope).fetchOrder(row.parentOrderId, row.symbol, { recvWindow: this.recvWindow });
           const status = String(parent.status ?? "").toLowerCase();
           const filled = asNum(parent.filled);
-          if (status === "closed" || filled > 0) {
-            const amount = filled > 0 ? filled : asNum(parent.amount);
+          const parentAmount = asNum(parent.amount);
+          const fullyFilled = status === "closed" || (parentAmount > 0 && filled >= parentAmount);
+          if (fullyFilled) {
+            const amount = parentAmount > 0 ? parentAmount : filled;
             if (!(amount > 0)) {
               this.protectionStore.markError(row.id, "FUTURES_PROTECTION_AMOUNT_UNKNOWN");
               continue;
@@ -1070,6 +1140,8 @@ export class BinanceFuturesTradingService {
               slOrderId: created.slOrderId,
               tpOrderId: created.tpOrderId,
             });
+          } else if (filled > 0) {
+            continue;
           } else if (["canceled", "cancelled", "expired", "rejected"].includes(status)) {
             this.protectionStore.markClosed(row.id);
           }
@@ -1096,23 +1168,24 @@ export class BinanceFuturesTradingService {
             : undefined;
           const slClosed = slStatus ? ["closed", "filled"].includes(String(slStatus.status ?? "").toLowerCase()) : false;
           const tpClosed = tpStatus ? ["closed", "filled"].includes(String(tpStatus.status ?? "").toLowerCase()) : false;
-          if (slClosed && row.tpOrderId) {
-            await this.getClient(scope).cancelOrder(row.tpOrderId, row.symbol, { recvWindow: this.recvWindow });
-            await this.telemetrySink.emitMetric({
-              name: "protection_pair_cancel_success",
-              value: 1,
-              timestamp: nowIso,
-              tags: this.tags("futures_protection_pair_cancel", { scope, symbol: row.symbol }),
-            });
-            this.protectionStore.markClosed(row.id);
-          } else if (tpClosed && row.slOrderId) {
-            await this.getClient(scope).cancelOrder(row.slOrderId, row.symbol, { recvWindow: this.recvWindow });
-            await this.telemetrySink.emitMetric({
-              name: "protection_pair_cancel_success",
-              value: 1,
-              timestamp: nowIso,
-              tags: this.tags("futures_protection_pair_cancel", { scope, symbol: row.symbol }),
-            });
+          if (slClosed || tpClosed) {
+            if (slClosed && row.tpOrderId) {
+              await this.getClient(scope).cancelOrder(row.tpOrderId, row.symbol, { recvWindow: this.recvWindow });
+              await this.telemetrySink.emitMetric({
+                name: "protection_pair_cancel_success",
+                value: 1,
+                timestamp: nowIso,
+                tags: this.tags("futures_protection_pair_cancel", { scope, symbol: row.symbol }),
+              });
+            } else if (tpClosed && row.slOrderId) {
+              await this.getClient(scope).cancelOrder(row.slOrderId, row.symbol, { recvWindow: this.recvWindow });
+              await this.telemetrySink.emitMetric({
+                name: "protection_pair_cancel_success",
+                value: 1,
+                timestamp: nowIso,
+                tags: this.tags("futures_protection_pair_cancel", { scope, symbol: row.symbol }),
+              });
+            }
             this.protectionStore.markClosed(row.id);
           }
         } catch (error) {

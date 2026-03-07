@@ -57,6 +57,7 @@ const initSchema = (db: Database.Database): void => {
     );
 
     CREATE INDEX IF NOT EXISTS idx_telemetry_metrics_name ON telemetry_metrics(name);
+    CREATE INDEX IF NOT EXISTS idx_telemetry_metrics_name_latest ON telemetry_metrics(name, timestamp DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_telemetry_metrics_run ON telemetry_metrics(run_id);
     CREATE INDEX IF NOT EXISTS idx_telemetry_metrics_trace ON telemetry_metrics(trace_id);
     CREATE INDEX IF NOT EXISTS idx_telemetry_metrics_time ON telemetry_metrics(timestamp);

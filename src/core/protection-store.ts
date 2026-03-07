@@ -33,8 +33,17 @@ export interface ProtectionGroupCreateInput {
 }
 
 const asNum = (value: unknown): number | undefined => {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : undefined;
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const n = Number(trimmed);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
 };
 
 const asRecord = (row: Record<string, unknown>): ProtectionGroupRecord => ({
