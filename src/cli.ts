@@ -362,7 +362,7 @@ const resolveRuntimeConfig = (
   const { runtime, meta } = loadRuntimeConfigWithMeta({ envFile: global.envFile });
   const envOrDefault = (name: string): "env" | "default" =>
     meta.keySource[name] && meta.keySource[name] !== "default" ? "env" : "default";
-  const modeFromEnv = parseMode(meta.resolvedValues.PIPELINE_MODE) ?? "backtest";
+  const modeFromEnv = parseMode(meta.resolvedValues.PIPELINE_MODE) ?? "paper";
   const outputFromEnv = parseOutput(meta.resolvedValues.OUTPUT_FORMAT) ?? "pretty";
 
   const effective: Record<string, JSONValue> = {
@@ -375,6 +375,15 @@ const resolveRuntimeConfig = (
     runner_interval_seconds: overrides.runnerIntervalSeconds ?? runtime.runnerIntervalSeconds,
     runner_candle_align: overrides.runnerCandleAlign ?? runtime.runnerCandleAlign,
     runner_max_backoff_seconds: overrides.runnerMaxBackoffSeconds ?? runtime.runnerMaxBackoffSeconds,
+    journaling_enabled: runtime.journalingEnabled,
+    journaling_base_url: runtime.journalingBaseUrl,
+    journaling_api_key: maskSecret(runtime.journalingApiKey),
+    journaling_timeout_ms: runtime.journalingTimeoutMs,
+    journaling_retry_max_attempts: runtime.journalingRetryMaxAttempts,
+    journaling_retry_initial_delay_ms: runtime.journalingRetryInitialDelayMs,
+    journaling_retry_max_delay_ms: runtime.journalingRetryMaxDelayMs,
+    journaling_retry_backoff_factor: runtime.journalingRetryBackoffFactor,
+    journaling_retry_jitter_ms: runtime.journalingRetryJitterMs,
     binance_account_enabled: runtime.binanceAccountEnabled,
     strict_real_mode: runtime.strictRealMode,
     obs_persist_enabled: runtime.obsPersistEnabled,
@@ -423,6 +432,15 @@ const resolveRuntimeConfig = (
       overrides.runnerMaxBackoffSeconds !== undefined
         ? "flag"
         : envOrDefault("RUNNER_MAX_BACKOFF_SECONDS"),
+    journaling_enabled: envOrDefault("JOURNALING_ENABLED"),
+    journaling_base_url: envOrDefault("JOURNALING_BASE_URL"),
+    journaling_api_key: envOrDefault("JOURNALING_API_KEY"),
+    journaling_timeout_ms: envOrDefault("JOURNALING_TIMEOUT_MS"),
+    journaling_retry_max_attempts: envOrDefault("JOURNALING_RETRY_MAX_ATTEMPTS"),
+    journaling_retry_initial_delay_ms: envOrDefault("JOURNALING_RETRY_INITIAL_DELAY_MS"),
+    journaling_retry_max_delay_ms: envOrDefault("JOURNALING_RETRY_MAX_DELAY_MS"),
+    journaling_retry_backoff_factor: envOrDefault("JOURNALING_RETRY_BACKOFF_FACTOR"),
+    journaling_retry_jitter_ms: envOrDefault("JOURNALING_RETRY_JITTER_MS"),
     binance_account_enabled: envOrDefault("BINANCE_ACCOUNT_ENABLED"),
     strict_real_mode: envOrDefault("STRICT_REAL_MODE"),
     obs_persist_enabled: envOrDefault("OBS_PERSIST_ENABLED"),

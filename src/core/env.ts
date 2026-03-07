@@ -26,6 +26,15 @@ PROVIDER_RETRY_INITIAL_DELAY_MS=300
 PROVIDER_RETRY_MAX_DELAY_MS=5000
 PROVIDER_RETRY_BACKOFF_FACTOR=2
 PROVIDER_RETRY_JITTER_MS=120
+JOURNALING_ENABLED=false
+JOURNALING_BASE_URL=https://vexis-log.vercel.app/api
+JOURNALING_API_KEY=
+JOURNALING_TIMEOUT_MS=5000
+JOURNALING_RETRY_MAX_ATTEMPTS=3
+JOURNALING_RETRY_INITIAL_DELAY_MS=300
+JOURNALING_RETRY_MAX_DELAY_MS=5000
+JOURNALING_RETRY_BACKOFF_FACTOR=2
+JOURNALING_RETRY_JITTER_MS=120
 
 SLO_P95_RUN_LATENCY_MS=15000
 SLO_MAX_FALLBACK_RATIO=0.4
@@ -98,6 +107,15 @@ export interface RuntimeConfig {
   providerRetryMaxDelayMs: number;
   providerRetryBackoffFactor: number;
   providerRetryJitterMs: number;
+  journalingEnabled: boolean;
+  journalingBaseUrl: string;
+  journalingApiKey: string;
+  journalingTimeoutMs: number;
+  journalingRetryMaxAttempts: number;
+  journalingRetryInitialDelayMs: number;
+  journalingRetryMaxDelayMs: number;
+  journalingRetryBackoffFactor: number;
+  journalingRetryJitterMs: number;
   sloP95RunLatencyMs: number;
   sloMaxFallbackRatio: number;
   sloMaxConsecutiveFailures: number;
@@ -342,6 +360,15 @@ export const loadRuntimeConfigWithMeta = (options: RuntimeEnvLoadOptions = {}): 
     providerRetryMaxDelayMs: asInt(getRaw("PROVIDER_RETRY_MAX_DELAY_MS"), 5000),
     providerRetryBackoffFactor: asFloat(getRaw("PROVIDER_RETRY_BACKOFF_FACTOR"), 2),
     providerRetryJitterMs: asInt(getRaw("PROVIDER_RETRY_JITTER_MS"), 120),
+    journalingEnabled: asBool(getRaw("JOURNALING_ENABLED"), false),
+    journalingBaseUrl: getRaw("JOURNALING_BASE_URL") ?? "https://vexis-log.vercel.app/api",
+    journalingApiKey: asSecret(getRaw("JOURNALING_API_KEY")),
+    journalingTimeoutMs: asInt(getRaw("JOURNALING_TIMEOUT_MS"), 5000),
+    journalingRetryMaxAttempts: asInt(getRaw("JOURNALING_RETRY_MAX_ATTEMPTS"), 3),
+    journalingRetryInitialDelayMs: asInt(getRaw("JOURNALING_RETRY_INITIAL_DELAY_MS"), 300),
+    journalingRetryMaxDelayMs: asInt(getRaw("JOURNALING_RETRY_MAX_DELAY_MS"), 5000),
+    journalingRetryBackoffFactor: asFloat(getRaw("JOURNALING_RETRY_BACKOFF_FACTOR"), 2),
+    journalingRetryJitterMs: asInt(getRaw("JOURNALING_RETRY_JITTER_MS"), 120),
     sloP95RunLatencyMs: asInt(getRaw("SLO_P95_RUN_LATENCY_MS"), 15000),
     sloMaxFallbackRatio: asFloat(getRaw("SLO_MAX_FALLBACK_RATIO"), 0.4),
     sloMaxConsecutiveFailures: asInt(getRaw("SLO_MAX_CONSECUTIVE_FAILURES"), 3),
@@ -392,6 +419,7 @@ export const loadRuntimeConfigWithMeta = (options: RuntimeEnvLoadOptions = {}): 
     cfg.theNewsApiBaseUrl = asHttpUrl(cfg.theNewsApiBaseUrl, "THENEWSAPI_BASE_URL");
     cfg.alternativeMeBaseUrl = asHttpUrl(cfg.alternativeMeBaseUrl, "ALTERNATIVE_ME_BASE_URL");
     cfg.coinGeckoBaseUrl = asHttpUrl(cfg.coinGeckoBaseUrl, "COINGECKO_BASE_URL");
+    cfg.journalingBaseUrl = asHttpUrl(cfg.journalingBaseUrl, "JOURNALING_BASE_URL");
   } catch (error) {
     throw new Error(formatRuntimeConfigError(String(error), meta));
   }
@@ -406,6 +434,12 @@ export const loadRuntimeConfigWithMeta = (options: RuntimeEnvLoadOptions = {}): 
   failIf(cfg.providerRetryMaxDelayMs < cfg.providerRetryInitialDelayMs, "PROVIDER_RETRY_MAX_DELAY_MS must be >= PROVIDER_RETRY_INITIAL_DELAY_MS", meta);
   failIf(cfg.providerRetryBackoffFactor < 1, "PROVIDER_RETRY_BACKOFF_FACTOR must be >= 1", meta);
   failIf(cfg.providerRetryJitterMs < 0, "PROVIDER_RETRY_JITTER_MS must be >= 0", meta);
+  failIf(cfg.journalingTimeoutMs < 500, "JOURNALING_TIMEOUT_MS must be >= 500", meta);
+  failIf(cfg.journalingRetryMaxAttempts < 1, "JOURNALING_RETRY_MAX_ATTEMPTS must be >= 1", meta);
+  failIf(cfg.journalingRetryInitialDelayMs < 0, "JOURNALING_RETRY_INITIAL_DELAY_MS must be >= 0", meta);
+  failIf(cfg.journalingRetryMaxDelayMs < cfg.journalingRetryInitialDelayMs, "JOURNALING_RETRY_MAX_DELAY_MS must be >= JOURNALING_RETRY_INITIAL_DELAY_MS", meta);
+  failIf(cfg.journalingRetryBackoffFactor < 1, "JOURNALING_RETRY_BACKOFF_FACTOR must be >= 1", meta);
+  failIf(cfg.journalingRetryJitterMs < 0, "JOURNALING_RETRY_JITTER_MS must be >= 0", meta);
   failIf(cfg.sloP95RunLatencyMs <= 0, "SLO_P95_RUN_LATENCY_MS must be > 0", meta);
   failIf(cfg.sloMaxFallbackRatio < 0 || cfg.sloMaxFallbackRatio > 1, "SLO_MAX_FALLBACK_RATIO must be 0..1", meta);
   failIf(cfg.sloMaxConsecutiveFailures < 1, "SLO_MAX_CONSECUTIVE_FAILURES must be >= 1", meta);
@@ -434,6 +468,10 @@ export const loadRuntimeConfigWithMeta = (options: RuntimeEnvLoadOptions = {}): 
   if (cfg.strictRealMode) {
     failIf(!cfg.theNewsApiKey, "THENEWSAPI_KEY is required when STRICT_REAL_MODE=true", meta);
     failIf(!cfg.openRouterApiKey, "OPENROUTER_API_KEY is required when STRICT_REAL_MODE=true", meta);
+  }
+
+  if (cfg.journalingEnabled) {
+    failIf(!cfg.journalingApiKey, "JOURNALING_API_KEY is required when JOURNALING_ENABLED=true", meta);
   }
 
   if (cfg.binanceAccountEnabled) {

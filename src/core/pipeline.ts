@@ -38,6 +38,7 @@ import { enforceExecutionHardGuards, enforceRiskHardGuards } from "./safety";
 import { BacktestDataProvider, RealCryptoDataProvider } from "./market-data";
 import { TimeoutBudget, withTimeout } from "./ops";
 import type { HealthMonitor } from "./health";
+import type { JournalingAgent } from "../agents/journaling";
 
 const noopTelemetrySink: TelemetrySink = {
   emitLog: async () => undefined,
@@ -119,6 +120,7 @@ export interface PipelineDeps {
   mode?: PipelineMode;
   contextFactory?: (input: PipelineRunRequest, traceId: string) => AgentContext;
   onLogEvent?: (event: DecisionLogEntry) => Promise<void> | void;
+  journalingAgent?: JournalingAgent;
 }
 
 export interface PipelineRunRequest {
@@ -150,6 +152,7 @@ const TradingState = Annotation.Root({
   riskDecision: Annotation<RiskDecision | null>,
   executionDecision: Annotation<ExecutionDecision | null>,
   executionReport: Annotation<ExecutionReport | null>,
+  journalTradeId: Annotation<string | null>,
 });
 
 type TradingStateType = typeof TradingState.State;
@@ -281,6 +284,33 @@ const buildGraph = (
         asset: ctx.asset,
       },
     }) as Promise<LLMRunnerResult<T>>;
+
+  const runJournalingHook = async <T>(
+    eventName: string,
+    fn: () => Promise<T>,
+  ): Promise<T | undefined> => {
+    if (!deps.journalingAgent) return undefined;
+    try {
+      return await fn();
+    } catch (error) {
+      await sink.emitMetric({
+        name: "journaling_fail_open_count",
+        value: 1,
+        timestamp: ctx.nowIso(),
+        tags: eventTags(ctx, "JournalingAgent", "system"),
+      });
+      await sink.emitAlert({
+        timestamp: ctx.nowIso(),
+        name: "journaling_fail_open",
+        severity: "warning",
+        trace_id: ctx.traceId,
+        tags: eventTags(ctx, "JournalingAgent", "system"),
+        node: "JournalingAgent",
+        message: `event=${eventName} error=${String(error)}`,
+      });
+      return undefined;
+    }
+  };
 
   const wrapNode =
     <T extends TradingStateType>(
@@ -748,7 +778,18 @@ const buildGraph = (
             decision_rationale: string;
           }>,
         );
-        return { proposal: result.output.output };
+        const proposal = result.output.output as TradeProposal;
+        const journalTradeId = await runJournalingHook(
+          "proposal_created",
+          async () =>
+            deps.journalingAgent!.onProposalCreated(ctx, {
+              asset: state.query.asset,
+              timeframe: state.query.timeframe,
+              proposal,
+              accountBalanceUsd: state.portfolio.equityUsd,
+            }),
+        );
+        return { proposal, journalTradeId: journalTradeId ?? state.journalTradeId };
       }),
     )
     .addNode(
@@ -809,6 +850,13 @@ const buildGraph = (
           result.retries,
         );
 
+        await runJournalingHook("risk_evaluated", async () =>
+          deps.journalingAgent!.onRiskEvaluated(ctx, {
+            proposal: state.proposal,
+            risk: guarded,
+          }),
+        );
+
         return { riskDecision: guarded };
       }),
     )
@@ -860,6 +908,13 @@ const buildGraph = (
           result.retries,
         );
 
+        await runJournalingHook("execution_decided:portfolio", async () =>
+          deps.journalingAgent!.onExecutionDecided(ctx, {
+            decision: guarded,
+            proposal: state.proposal,
+          }),
+        );
+
         return { executionDecision: guarded };
       }),
     )
@@ -879,6 +934,14 @@ const buildGraph = (
             marketPrice: state.snapshot.lastPrice,
           },
           ctx,
+        );
+
+        await runJournalingHook("execution_decided:terminal_approved", async () =>
+          deps.journalingAgent!.onExecutionDecided(ctx, {
+            decision: state.executionDecision,
+            report: executionReport,
+            proposal: state.proposal,
+          }),
         );
 
         return { executionReport };
@@ -911,6 +974,14 @@ const buildGraph = (
             marketPrice: state.snapshot.lastPrice,
           },
           ctx,
+        );
+
+        await runJournalingHook("execution_decided:terminal_rejected", async () =>
+          deps.journalingAgent!.onExecutionDecided(ctx, {
+            decision: noFillDecision,
+            report: executionReport,
+            proposal: state.proposal,
+          }),
         );
 
         return { executionDecision: noFillDecision, executionReport };
@@ -976,6 +1047,7 @@ export class TradingPipeline {
           riskDecision: null,
           executionDecision: null,
           executionReport: null,
+          journalTradeId: null,
         }),
         runBudget.remainingMs(),
         "RUN_TIMEOUT",
@@ -1024,6 +1096,33 @@ export class TradingPipeline {
         });
       }
 
+      if (this.deps.journalingAgent) {
+        try {
+          await this.deps.journalingAgent.onRunSummarized(ctx, {
+            approved: finalState.executionDecision.approve,
+            reasons: finalState.executionDecision.reasons,
+          });
+        } catch (error) {
+          await sink.emitMetric({
+            name: "journaling_fail_open_count",
+            value: 1,
+            timestamp: ctx.nowIso(),
+            tags: eventTags(ctx, "JournalingAgent", "system"),
+          });
+          await sink.emitAlert({
+            timestamp: ctx.nowIso(),
+            name: "journaling_fail_open",
+            severity: "warning",
+            trace_id: traceId,
+            tags: eventTags(ctx, "JournalingAgent", "system"),
+            node: "JournalingAgent",
+            message: `event=run_summarized error=${String(error)}`,
+          });
+        } finally {
+          this.deps.journalingAgent.clear(input.runId);
+        }
+      }
+
       return {
         traceId,
         executionDecision: finalState.executionDecision,
@@ -1031,6 +1130,19 @@ export class TradingPipeline {
         logs,
       };
     } catch (error) {
+      if (this.deps.journalingAgent) {
+        try {
+          await this.deps.journalingAgent.onRunSummarized(ctx, {
+            approved: false,
+            reasons: [String(error)],
+          });
+        } catch {
+          // fail-open
+        } finally {
+          this.deps.journalingAgent.clear(input.runId);
+        }
+      }
+
       await sink.emitMetric({
         name: "run_success",
         value: 0,

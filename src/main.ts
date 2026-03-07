@@ -5,6 +5,7 @@ import {
   DebateSynthesizer,
   FundamentalsAnalyst,
   NewsAnalyst,
+  JournalingAgent,
   PortfolioManager,
   RiskManager,
   SentimentAnalyst,
@@ -18,6 +19,7 @@ import { InMemoryEventStore, SqliteEventStorePersistence } from "./core/event-st
 import { HealthServer } from "./core/health-server";
 import { HealthMonitor } from "./core/health";
 import { LLMRunner } from "./core/llm-runner";
+import { HttpJournalingClient } from "./core/journaling";
 import type { PipelineRunResult } from "./core/pipeline";
 import { TradingPipeline, createModeDataProvider } from "./core/pipeline";
 import { RunnerService } from "./core/runner";
@@ -85,7 +87,7 @@ class StreamEventStore implements EventStore {
 export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => {
   const { runtime, meta } = loadRuntimeConfigWithMeta({ envFile: overrides.envFile });
 
-  const mode = overrides.mode ?? parseMode(meta.resolvedValues.PIPELINE_MODE) ?? "backtest";
+  const mode = overrides.mode ?? parseMode(meta.resolvedValues.PIPELINE_MODE) ?? "paper";
   const outputFormat = overrides.outputFormat ?? parseOutput(meta.resolvedValues.OUTPUT_FORMAT) ?? "pretty";
   const showTelemetry = overrides.showTelemetry ?? runtime.showTelemetry;
   const telemetryConsoleMirror =
@@ -191,6 +193,27 @@ export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => 
     }
   });
 
+  const journalingAgent = runtime.journalingEnabled
+    ? new JournalingAgent(
+        new HttpJournalingClient({
+          enabled: runtime.journalingEnabled,
+          baseUrl: runtime.journalingBaseUrl,
+          apiKey: runtime.journalingApiKey,
+          timeoutMs: runtime.journalingTimeoutMs,
+          retry: {
+            maxAttempts: runtime.journalingRetryMaxAttempts,
+            initialDelayMs: runtime.journalingRetryInitialDelayMs,
+            backoffFactor: runtime.journalingRetryBackoffFactor,
+            maxDelayMs: runtime.journalingRetryMaxDelayMs,
+            jitterMs: runtime.journalingRetryJitterMs,
+          },
+          telemetrySink: sink,
+        }),
+        decisionRunner,
+        runtime.llmMaxRetries,
+      )
+    : undefined;
+
   const pipeline = new TradingPipeline({
     eventStore,
     telemetrySink: sink,
@@ -225,7 +248,8 @@ export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => 
         slippageBps: runtime.simSlippageBps,
         partialFillEnabled: runtime.simPartialFillEnabled
       })
-    }
+    },
+    journalingAgent,
   });
 
   const printCycle = async (result: PipelineRunResult): Promise<void> => {

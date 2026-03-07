@@ -528,6 +528,33 @@ export interface EffectiveConfigView {
   source: Record<string, "flag" | "env" | "default">;
 }
 
+export type JournalingEventType =
+  | "proposal_created"
+  | "risk_evaluated"
+  | "execution_decided"
+  | "run_summarized";
+
+export interface JournalingRequestMeta {
+  idempotencyKey: string;
+  traceId: string;
+  runId: string;
+  mode: PipelineMode;
+  asset: string;
+  eventType: JournalingEventType;
+}
+
+export interface JournalingRule {
+  ruleId: string;
+  ruleContent: string;
+  isMandatory: boolean;
+}
+
+export interface JournalingClient {
+  listTradeRules(meta: JournalingRequestMeta): Promise<JournalingRule[]>;
+  postTrade(payload: Record<string, unknown>, meta: JournalingRequestMeta): Promise<{ id: string }>;
+  patchTrade(id: string, payload: Record<string, unknown>, meta: JournalingRequestMeta): Promise<void>;
+}
+
 export type SpotOrderType = "market" | "limit";
 export type SpotOrderSide = "buy" | "sell";
 export type SpotTimeInForce = "GTC" | "IOC" | "FOK";
