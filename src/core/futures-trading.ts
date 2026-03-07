@@ -168,9 +168,24 @@ const isNativeProtectionUnsupportedError = (error: unknown): boolean => {
     "not supported",
     "unknown parameter",
     "unrecognized parameter",
-    "invalid parameter",
   ].some((token) => haystack.includes(token));
   return mentionsProtectionParams && explicitUnsupported;
+};
+
+const collectNumericParamValues = (value: unknown, key: string, out: number[] = []): number[] => {
+  if (Array.isArray(value)) {
+    for (const item of value) collectNumericParamValues(item, key, out);
+    return out;
+  }
+  if (!value || typeof value !== "object") return out;
+  for (const [k, v] of Object.entries(value)) {
+    if (k.toLowerCase() === key) {
+      const n = Number(v);
+      if (Number.isFinite(n)) out.push(n);
+    }
+    if (v && typeof v === "object") collectNumericParamValues(v, key, out);
+  }
+  return out;
 };
 
 const isNativeProtectionApplied = (
@@ -180,9 +195,8 @@ const isNativeProtectionApplied = (
   if (!(request.stopLoss || request.takeProfit)) return false;
   const info = (row as { info?: unknown }).info;
   if (!info || typeof info !== "object") return false;
-  const serialized = JSON.stringify(info).toLowerCase();
-  const slApplied = request.stopLoss ? serialized.includes("stoplossprice") || serialized.includes("stopprice") : true;
-  const tpApplied = request.takeProfit ? serialized.includes("takeprofitprice") || serialized.includes("takeprofit") : true;
+  const slApplied = request.stopLoss ? collectNumericParamValues(info, "stoplossprice").length > 0 : true;
+  const tpApplied = request.takeProfit ? collectNumericParamValues(info, "takeprofitprice").length > 0 : true;
   return slApplied && tpApplied;
 };
 
@@ -248,6 +262,7 @@ export class BinanceFuturesTradingService {
   private readonly usdmClient: FuturesClientLike;
   private readonly coinmClient: FuturesClientLike;
   private readonly protectionStore?: ProtectionGroupStore;
+  private readonly protectionMonitorRetryBudget = 5;
   private monitorTimer: NodeJS.Timeout | null = null;
   private isProtectionMonitorRunning = false;
   private readonly markets = new Map<FuturesScope, Map<string, FuturesMarket>>();
@@ -674,6 +689,7 @@ export class BinanceFuturesTradingService {
         stopLoss,
         takeProfit,
       });
+      await this.ensureTradingSetup(input.scope, symbol);
       const parentOrderId = `manual-${Date.now()}-${Math.round(Math.random() * 1_000_000)}`;
       const group = this.protectionStore.upsertPending({
         scope: input.scope,
@@ -1001,6 +1017,7 @@ export class BinanceFuturesTradingService {
     if (!(quantity > 0)) {
       throw new FuturesGuardError("FUTURES_PROTECTION_AMOUNT_UNKNOWN", "Unable to determine filled amount for SL/TP.");
     }
+    await this.ensureTradingSetup(scope, request.symbol);
     const created = await this.createFuturesProtectionOrders(scope, request.symbol, request.side, quantity, request.stopLoss, request.takeProfit);
     this.protectionStore.markActive(group.id, {
       mode: created.mode,
@@ -1044,10 +1061,23 @@ export class BinanceFuturesTradingService {
     const hedgeMode = this.config.positionMode === "hedge";
     const sharedNativeParams = {
       recvWindow: this.recvWindow,
-      closePosition: true,
-      ...(hedgeMode ? { positionSide } : {}),
+      ...(hedgeMode ? { positionSide } : { reduceOnly: true }),
     };
     const created: { mode: ProtectionModeRecord; slOrderId?: string; tpOrderId?: string } = { mode: "fallback" };
+    const rollbackCreated = async (): Promise<void> => {
+      for (const orderId of [created.slOrderId, created.tpOrderId]) {
+        if (!orderId) continue;
+        try {
+          await withTimeout(
+            client.cancelOrder(orderId, symbol, { recvWindow: this.recvWindow }),
+            this.timeoutMs,
+            "BINANCE_FUTURES_CANCEL_PROTECTION_ROLLBACK_TIMEOUT"
+          );
+        } catch {
+          // best-effort rollback
+        }
+      }
+    };
     let mode: ProtectionModeRecord = "fallback";
     try {
       if (stopLoss) {
@@ -1075,29 +1105,34 @@ export class BinanceFuturesTradingService {
       mode = "native";
     } catch {
       mode = "fallback";
-      if (stopLoss && !created.slOrderId) {
-        const sl = await withTimeout(
-          client.createOrder(symbol, "market", closeSide, amount, undefined, {
-            recvWindow: this.recvWindow,
-            triggerPrice: stopLoss,
-            ...(hedgeMode ? { positionSide } : { reduceOnly: true }),
-          }),
-          this.timeoutMs,
-          "BINANCE_FUTURES_CREATE_SL_FALLBACK_TIMEOUT"
-        );
-        created.slOrderId = sl.id ? String(sl.id) : undefined;
-      }
-      if (takeProfit && !created.tpOrderId) {
-        const tp = await withTimeout(
-          client.createOrder(symbol, "market", closeSide, amount, undefined, {
-            recvWindow: this.recvWindow,
-            triggerPrice: takeProfit,
-            ...(hedgeMode ? { positionSide } : { reduceOnly: true }),
-          }),
-          this.timeoutMs,
-          "BINANCE_FUTURES_CREATE_TP_FALLBACK_TIMEOUT"
-        );
-        created.tpOrderId = tp.id ? String(tp.id) : undefined;
+      try {
+        if (stopLoss && !created.slOrderId) {
+          const sl = await withTimeout(
+            client.createOrder(symbol, "market", closeSide, amount, undefined, {
+              recvWindow: this.recvWindow,
+              triggerPrice: stopLoss,
+              ...(hedgeMode ? { positionSide } : { reduceOnly: true }),
+            }),
+            this.timeoutMs,
+            "BINANCE_FUTURES_CREATE_SL_FALLBACK_TIMEOUT"
+          );
+          created.slOrderId = sl.id ? String(sl.id) : undefined;
+        }
+        if (takeProfit && !created.tpOrderId) {
+          const tp = await withTimeout(
+            client.createOrder(symbol, "market", closeSide, amount, undefined, {
+              recvWindow: this.recvWindow,
+              triggerPrice: takeProfit,
+              ...(hedgeMode ? { positionSide } : { reduceOnly: true }),
+            }),
+            this.timeoutMs,
+            "BINANCE_FUTURES_CREATE_TP_FALLBACK_TIMEOUT"
+          );
+          created.tpOrderId = tp.id ? String(tp.id) : undefined;
+        }
+      } catch (fallbackError) {
+        await rollbackCreated();
+        throw fallbackError;
       }
     }
     return { mode, slOrderId: created.slOrderId, tpOrderId: created.tpOrderId };
@@ -1148,6 +1183,7 @@ export class BinanceFuturesTradingService {
               this.protectionStore.markError(row.id, "FUTURES_PROTECTION_AMOUNT_UNKNOWN");
               continue;
             }
+            await this.ensureTradingSetup(scope, row.symbol);
             const created = await this.createFuturesProtectionOrders(scope, row.symbol, row.parentSide, amount, row.slPrice, row.tpPrice);
             this.protectionStore.markActive(row.id, {
               mode: created.mode,
@@ -1160,7 +1196,10 @@ export class BinanceFuturesTradingService {
             this.protectionStore.markClosed(row.id);
           }
         } catch (error) {
-          this.protectionStore.markError(row.id, String(error));
+          const retries = this.protectionStore.recordMonitorError(row.id, String(error));
+          if (retries > this.protectionMonitorRetryBudget) {
+            this.protectionStore.markError(row.id, String(error));
+          }
         }
       }
 
@@ -1209,7 +1248,10 @@ export class BinanceFuturesTradingService {
             timestamp: nowIso,
             tags: this.tags("futures_protection_pair_cancel", { scope, symbol: row.symbol }),
           });
-          this.protectionStore.markError(row.id, String(error));
+          const retries = this.protectionStore.recordMonitorError(row.id, String(error));
+          if (retries > this.protectionMonitorRetryBudget) {
+            this.protectionStore.markError(row.id, String(error));
+          }
         }
       }
 

@@ -359,12 +359,17 @@ export class SqliteTelemetrySink implements TelemetrySink {
           SELECT m2.value
           FROM telemetry_metrics m2
           WHERE m2.name = m.name
-          ORDER BY m2.timestamp DESC, m2.id DESC
+            AND m2.timestamp = (
+              SELECT MAX(m3.timestamp)
+              FROM telemetry_metrics m3
+              WHERE m3.name = m.name
+            )
+          ORDER BY m2.id DESC
           LIMIT 1
         ) AS latest_value
       FROM telemetry_metrics m
       GROUP BY m.name
-      ORDER BY latest_timestamp DESC
+      ORDER BY latest_timestamp DESC, m.name ASC
       LIMIT ?
     `).all(Math.max(1, limit)) as Array<Record<string, unknown>>;
 

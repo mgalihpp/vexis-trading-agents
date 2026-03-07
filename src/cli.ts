@@ -471,6 +471,9 @@ const doHealthCheck = async (options: HealthOptions, fallbackPort: number): Prom
 };
 
 const createDashboardServer = (runtime: RuntimeConfig, portOverride?: number): DashboardServerHandle => {
+  if (!runtime.obsPersistEnabled) {
+    throw new Error("Dashboard requires OBS_PERSIST_ENABLED=true so metrics can be read from SQLite telemetry.");
+  }
   const telemetry = new InMemoryTelemetrySink(false);
   const monitor = new HealthMonitor(telemetry, {
     maxP95RunLatencyMs: runtime.sloP95RunLatencyMs,
@@ -487,7 +490,7 @@ const createDashboardServer = (runtime: RuntimeConfig, portOverride?: number): D
     getLastRun: () => monitor.getLastRunSample(),
     getMetricsView: (limit = 500) => ({
       metrics: sqliteSink.getMetrics({ limit }),
-      summary: sqliteSink.getMetricSummary(500),
+      summary: sqliteSink.getMetricSummary(Math.max(1, limit)),
       alerts: sqliteSink.getAlerts({ limit: Math.max(50, Math.min(limit, 1000)) }),
     }),
   });

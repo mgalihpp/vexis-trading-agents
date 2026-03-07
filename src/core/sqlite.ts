@@ -97,7 +97,9 @@ const initSchema = (db: Database.Database): void => {
       tp_order_id TEXT,
       mode TEXT,
       status TEXT NOT NULL,
+      retry_count INTEGER NOT NULL DEFAULT 0,
       last_error TEXT,
+      last_error_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       UNIQUE(scope, symbol, parent_order_id)
@@ -106,6 +108,15 @@ const initSchema = (db: Database.Database): void => {
     CREATE INDEX IF NOT EXISTS idx_protection_groups_status ON protection_groups(status);
     CREATE INDEX IF NOT EXISTS idx_protection_groups_scope_symbol ON protection_groups(scope, symbol);
   `);
+
+  const columns = db.prepare("PRAGMA table_info(protection_groups)").all() as Array<{ name?: unknown }>;
+  const names = new Set(columns.map((row) => String(row.name ?? "")));
+  if (!names.has("retry_count")) {
+    db.exec("ALTER TABLE protection_groups ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;");
+  }
+  if (!names.has("last_error_at")) {
+    db.exec("ALTER TABLE protection_groups ADD COLUMN last_error_at TEXT;");
+  }
 };
 
 export const openObservabilityDb = (dbPath: string): Database.Database => {

@@ -17,7 +17,9 @@ export interface ProtectionGroupRecord {
   tpOrderId?: string;
   mode?: ProtectionModeRecord;
   status: ProtectionStatus;
+  retryCount: number;
   lastError?: string;
+  lastErrorAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -59,7 +61,9 @@ const asRecord = (row: Record<string, unknown>): ProtectionGroupRecord => ({
   tpOrderId: row.tp_order_id ? String(row.tp_order_id) : undefined,
   mode: row.mode ? (String(row.mode) as ProtectionModeRecord) : undefined,
   status: String(row.status) as ProtectionStatus,
+  retryCount: Number(row.retry_count ?? 0),
   lastError: row.last_error ? String(row.last_error) : undefined,
+  lastErrorAt: row.last_error_at ? String(row.last_error_at) : undefined,
   createdAt: String(row.created_at),
   updatedAt: String(row.updated_at),
 });
@@ -83,8 +87,10 @@ export class ProtectionGroupStore {
         sl_price = excluded.sl_price,
         tp_price = excluded.tp_price,
         status = excluded.status,
+        retry_count = 0,
         updated_at = excluded.updated_at,
-        last_error = NULL
+        last_error = NULL,
+        last_error_at = NULL
     `).run(
       input.scope,
       input.symbol,
@@ -137,7 +143,9 @@ export class ProtectionGroupStore {
           mode = ?,
           sl_order_id = ?,
           tp_order_id = ?,
+          retry_count = 0,
           last_error = NULL,
+          last_error_at = NULL,
           updated_at = ?
       WHERE id = ?
     `).run(input.mode, input.slOrderId ?? null, input.tpOrderId ?? null, nowIso, id);
@@ -158,9 +166,28 @@ export class ProtectionGroupStore {
     this.db.prepare(`
       UPDATE protection_groups
       SET status = 'error',
+          retry_count = COALESCE(retry_count, 0) + 1,
           last_error = ?,
+          last_error_at = ?,
           updated_at = ?
       WHERE id = ?
-    `).run(message, nowIso, id);
+    `).run(message, nowIso, nowIso, id);
+  }
+
+  public recordMonitorError(id: number, message: string): number {
+    const nowIso = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE protection_groups
+      SET retry_count = COALESCE(retry_count, 0) + 1,
+          last_error = ?,
+          last_error_at = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(message, nowIso, nowIso, id);
+
+    const row = this.db
+      .prepare("SELECT retry_count FROM protection_groups WHERE id = ? LIMIT 1")
+      .get(id) as { retry_count?: unknown } | undefined;
+    return Number(row?.retry_count ?? 0);
   }
 }

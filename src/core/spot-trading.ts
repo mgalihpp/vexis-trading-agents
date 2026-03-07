@@ -142,9 +142,24 @@ const isNativeProtectionUnsupportedError = (error: unknown): boolean => {
     "not supported",
     "unknown parameter",
     "unrecognized parameter",
-    "invalid parameter",
   ].some((token) => haystack.includes(token));
   return mentionsProtectionParams && explicitUnsupported;
+};
+
+const collectNumericParamValues = (value: unknown, key: string, out: number[] = []): number[] => {
+  if (Array.isArray(value)) {
+    for (const item of value) collectNumericParamValues(item, key, out);
+    return out;
+  }
+  if (!value || typeof value !== "object") return out;
+  for (const [k, v] of Object.entries(value)) {
+    if (k.toLowerCase() === key) {
+      const n = Number(v);
+      if (Number.isFinite(n)) out.push(n);
+    }
+    if (v && typeof v === "object") collectNumericParamValues(v, key, out);
+  }
+  return out;
 };
 
 const isNativeProtectionApplied = (
@@ -154,9 +169,8 @@ const isNativeProtectionApplied = (
   if (!(request.stopLoss || request.takeProfit)) return false;
   const info = (row as { info?: unknown }).info;
   if (!info || typeof info !== "object") return false;
-  const serialized = JSON.stringify(info).toLowerCase();
-  const slApplied = request.stopLoss ? serialized.includes("stoplossprice") || serialized.includes("stopprice") : true;
-  const tpApplied = request.takeProfit ? serialized.includes("takeprofitprice") || serialized.includes("takeprofit") : true;
+  const slApplied = request.stopLoss ? collectNumericParamValues(info, "stoplossprice").length > 0 : true;
+  const tpApplied = request.takeProfit ? collectNumericParamValues(info, "takeprofitprice").length > 0 : true;
   return slApplied && tpApplied;
 };
 
@@ -205,6 +219,7 @@ export class BinanceSpotTradingService {
   private readonly recvWindow: number;
   private readonly defaultTif: SpotTimeInForce;
   private readonly protectionStore?: ProtectionGroupStore;
+  private readonly protectionMonitorRetryBudget = 5;
   private monitorTimer: NodeJS.Timeout | null = null;
   private isProtectionMonitorRunning = false;
   private marketsLoaded = false;
@@ -885,12 +900,17 @@ export class BinanceSpotTradingService {
       tpPrice: request.takeProfit,
     });
     const filled = asNum(parent.filled);
-    if (request.type === "limit" && filled <= 0) {
-      return {
-        enabled: true,
-        mode: preferredMode,
-        parentOrderId: parentId,
-      };
+    if (request.type === "limit") {
+      const totalAmount = asNum(parent.amount) || asNum(request.amount);
+      const finalStatus = ["closed", "filled"].includes(String(parent.status ?? "").toLowerCase());
+      const fullyFilled = finalStatus || (totalAmount > 0 && filled >= totalAmount);
+      if (!fullyFilled) {
+        return {
+          enabled: true,
+          mode: preferredMode,
+          parentOrderId: parentId,
+        };
+      }
     }
     const quantity = filled > 0 ? filled : asNum(request.amount);
     if (!(quantity > 0)) {
@@ -940,6 +960,20 @@ export class BinanceSpotTradingService {
   ): Promise<{ mode: ProtectionModeRecord; slOrderId?: string; tpOrderId?: string }> {
     const closeSide: "buy" | "sell" = parentSide === "buy" ? "sell" : "buy";
     const created: { mode: ProtectionModeRecord; slOrderId?: string; tpOrderId?: string } = { mode: "fallback" };
+    const rollbackCreated = async (): Promise<void> => {
+      for (const orderId of [created.slOrderId, created.tpOrderId]) {
+        if (!orderId) continue;
+        try {
+          await withTimeout(
+            this.client.cancelOrder(orderId, symbol, { recvWindow: this.recvWindow }),
+            this.timeoutMs,
+            "BINANCE_SPOT_CANCEL_PROTECTION_ROLLBACK_TIMEOUT"
+          );
+        } catch {
+          // best-effort rollback
+        }
+      }
+    };
     let mode: ProtectionModeRecord = "fallback";
     try {
       if (stopLoss) {
@@ -969,27 +1003,32 @@ export class BinanceSpotTradingService {
       mode = "native";
     } catch {
       mode = "fallback";
-      if (stopLoss && !created.slOrderId) {
-        const sl = await withTimeout(
-          this.client.createOrder(symbol, "limit", closeSide, amount, stopLoss, {
-            recvWindow: this.recvWindow,
-            triggerPrice: stopLoss,
-          }),
-          this.timeoutMs,
-          "BINANCE_SPOT_CREATE_SL_FALLBACK_TIMEOUT"
-        );
-        created.slOrderId = sl.id ? String(sl.id) : undefined;
-      }
-      if (takeProfit && !created.tpOrderId) {
-        const tp = await withTimeout(
-          this.client.createOrder(symbol, "limit", closeSide, amount, takeProfit, {
-            recvWindow: this.recvWindow,
-            triggerPrice: takeProfit,
-          }),
-          this.timeoutMs,
-          "BINANCE_SPOT_CREATE_TP_FALLBACK_TIMEOUT"
-        );
-        created.tpOrderId = tp.id ? String(tp.id) : undefined;
+      try {
+        if (stopLoss && !created.slOrderId) {
+          const sl = await withTimeout(
+            this.client.createOrder(symbol, "limit", closeSide, amount, stopLoss, {
+              recvWindow: this.recvWindow,
+              triggerPrice: stopLoss,
+            }),
+            this.timeoutMs,
+            "BINANCE_SPOT_CREATE_SL_FALLBACK_TIMEOUT"
+          );
+          created.slOrderId = sl.id ? String(sl.id) : undefined;
+        }
+        if (takeProfit && !created.tpOrderId) {
+          const tp = await withTimeout(
+            this.client.createOrder(symbol, "limit", closeSide, amount, takeProfit, {
+              recvWindow: this.recvWindow,
+              triggerPrice: takeProfit,
+            }),
+            this.timeoutMs,
+            "BINANCE_SPOT_CREATE_TP_FALLBACK_TIMEOUT"
+          );
+          created.tpOrderId = tp.id ? String(tp.id) : undefined;
+        }
+      } catch (fallbackError) {
+        await rollbackCreated();
+        throw fallbackError;
       }
     }
     return { mode, slOrderId: created.slOrderId, tpOrderId: created.tpOrderId };
@@ -1055,7 +1094,10 @@ export class BinanceSpotTradingService {
             this.protectionStore.markClosed(row.id);
           }
         } catch (error) {
-          this.protectionStore.markError(row.id, String(error));
+          const retries = this.protectionStore.recordMonitorError(row.id, String(error));
+          if (retries > this.protectionMonitorRetryBudget) {
+            this.protectionStore.markError(row.id, String(error));
+          }
         }
       }
 
@@ -1102,7 +1144,10 @@ export class BinanceSpotTradingService {
             timestamp: nowIso,
             tags: this.tags("spot_protection_pair_cancel", { symbol: row.symbol }),
           });
-          this.protectionStore.markError(row.id, String(error));
+          const retries = this.protectionStore.recordMonitorError(row.id, String(error));
+          if (retries > this.protectionMonitorRetryBudget) {
+            this.protectionStore.markError(row.id, String(error));
+          }
         }
       }
 
