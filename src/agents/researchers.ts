@@ -1,13 +1,25 @@
-﻿import type {
+import type {
   AnalystBundle,
   BearishResearch,
   BullishResearch,
+  ConfidenceVector,
   DebateOutput,
   EventStore,
-  AgentContext
+  AgentContext,
 } from "../types";
 import { clamp, round } from "../utils/common";
 import { BaseAgent } from "./base";
+
+const buildConfidence = (
+  signal: number,
+  data: number,
+  reliability: number,
+): ConfidenceVector => ({
+  signal_confidence: round(clamp(signal, 0, 1), 4),
+  data_quality_confidence: round(clamp(data, 0, 1), 4),
+  model_reliability: round(clamp(reliability, 0, 1), 4),
+  effective_confidence: round(clamp(signal * 0.5 + data * 0.2 + reliability * 0.3, 0, 1), 4),
+});
 
 export class BullishResearcher extends BaseAgent<AnalystBundle, BullishResearch> {
   public readonly name = "BullishResearcher";
@@ -17,40 +29,45 @@ export class BullishResearcher extends BaseAgent<AnalystBundle, BullishResearch>
   }
 
   public async run(input: AnalystBundle, ctx: AgentContext): Promise<BullishResearch> {
-    const argumentsList: string[] = [];
-    const failureModes: string[] = [];
+    const thesis: string[] = [];
+    const invalidationTriggers: string[] = [];
 
     if (input.fundamentals.intrinsic_valuation_bias === "undervalued") {
-      argumentsList.push("Valuation appears discounted relative to growth profile.");
+      thesis.push("Valuation appears discounted relative to growth profile.");
     } else if (input.fundamentals.intrinsic_valuation_bias === "overvalued") {
-      failureModes.push("Overvaluation risk can cap upside follow-through.");
+      invalidationTriggers.push("Overvaluation risk can cap upside follow-through.");
     }
     if (input.sentiment.sentiment_score > 0) {
-      argumentsList.push("Market sentiment leans risk-on.");
+      thesis.push("Market sentiment leans risk-on.");
     } else if (input.sentiment.sentiment_score < 0) {
-      failureModes.push("Sentiment reversal can invalidate bullish continuation.");
+      invalidationTriggers.push("Sentiment reversal can invalidate bullish continuation.");
     }
     if (input.technical.signals.direction === "buy") {
-      argumentsList.push("Technical setup aligns with momentum continuation.");
+      thesis.push("Technical setup aligns with momentum continuation.");
     } else if (input.technical.signals.direction === "sell") {
-      failureModes.push("Momentum breakdown can trigger downside acceleration.");
+      invalidationTriggers.push("Momentum breakdown can trigger downside acceleration.");
     }
     if (input.news.event_impact !== "bearish") {
-      argumentsList.push("News flow is not structurally negative.");
+      thesis.push("News flow is not structurally negative.");
     } else {
-      failureModes.push("Bearish headline shocks can break bullish thesis.");
+      invalidationTriggers.push("Bearish headline shocks can break bullish thesis.");
     }
 
-    const riskOrRewardEstimatePct = round(
-      clamp(2 + input.technical.signals.calibrated_probability * 6 + input.sentiment.confidence * 3, 1, 15),
-      3
+    const expectedMovePct = round(
+      clamp(2 + input.technical.signals.calibrated_probability * 6 + input.sentiment.confidence.effective_confidence * 3, 1, 15),
+      3,
     );
 
     const output: BullishResearch = {
-      arguments: argumentsList,
-      risk_or_reward_estimate_pct: riskOrRewardEstimatePct,
-      failure_modes: failureModes,
-      confidence: round(clamp(0.35 + argumentsList.length * 0.12, 0.2, 0.9), 3)
+      thesis,
+      expected_move_pct: expectedMovePct,
+      time_horizon: "intraday",
+      invalidation_triggers: invalidationTriggers,
+      confidence: buildConfidence(
+        clamp(0.35 + thesis.length * 0.12, 0.2, 0.9),
+        input.data_quality.provider_health_score,
+        clamp((input.technical.signals.confidence.model_reliability + input.sentiment.confidence.model_reliability) / 2, 0, 1),
+      ),
     };
 
     await this.logDecision(ctx, input, output, "Built upside thesis from valuation, sentiment, technicals and event backdrop.");
@@ -66,36 +83,41 @@ export class BearishResearcher extends BaseAgent<AnalystBundle, BearishResearch>
   }
 
   public async run(input: AnalystBundle, ctx: AgentContext): Promise<BearishResearch> {
-    const argumentsList: string[] = [];
-    const failureModes: string[] = [];
+    const thesis: string[] = [];
+    const invalidationTriggers: string[] = [];
 
     if (input.fundamentals.red_flags.length > 0) {
-      argumentsList.push("Balance-sheet and quality red flags remain unresolved.");
-      failureModes.push("Fundamental deterioration triggers repricing.");
+      thesis.push("Balance-sheet and quality red flags remain unresolved.");
+      invalidationTriggers.push("Fundamental deterioration triggers repricing.");
     }
     if (input.news.event_impact === "bearish") {
-      argumentsList.push("Negative event cluster increases downside tail risk.");
-      failureModes.push("Policy headline shock drives gap-down move.");
+      thesis.push("Negative event cluster increases downside tail risk.");
+      invalidationTriggers.push("Policy headline shock drives gap-down move.");
     }
     if (input.technical.signals.direction === "sell") {
-      argumentsList.push("Momentum profile warns of trend exhaustion.");
-      failureModes.push("Support breach accelerates liquidations.");
+      thesis.push("Momentum profile warns of trend exhaustion.");
+      invalidationTriggers.push("Support breach accelerates liquidations.");
     }
     if (input.sentiment.mood === "fearful") {
-      argumentsList.push("Sentiment regime indicates fragile demand.");
-      failureModes.push("Risk-off flow suppresses rebounds.");
+      thesis.push("Sentiment regime indicates fragile demand.");
+      invalidationTriggers.push("Risk-off flow suppresses rebounds.");
     }
 
-    const riskOrRewardEstimatePct = round(
-      clamp(2 + input.technical.signals.calibrated_probability * 6 + input.sentiment.confidence * 3, 1, 15),
-      3
+    const expectedMovePct = round(
+      clamp(2 + input.technical.signals.calibrated_probability * 6 + input.sentiment.confidence.effective_confidence * 3, 1, 15),
+      3,
     );
 
     const output: BearishResearch = {
-      arguments: argumentsList,
-      risk_or_reward_estimate_pct: riskOrRewardEstimatePct,
-      failure_modes: failureModes,
-      confidence: round(clamp(0.3 + argumentsList.length * 0.14, 0.2, 0.9), 3)
+      thesis,
+      expected_move_pct: expectedMovePct,
+      time_horizon: "intraday",
+      invalidation_triggers: invalidationTriggers,
+      confidence: buildConfidence(
+        clamp(0.3 + thesis.length * 0.14, 0.2, 0.9),
+        input.data_quality.provider_health_score,
+        clamp((input.technical.signals.confidence.model_reliability + input.news.confidence.model_reliability) / 2, 0, 1),
+      ),
     };
 
     await this.logDecision(ctx, input, output, "Stress-tested assumptions and enumerated principal downside failure modes.");
@@ -112,22 +134,50 @@ export class DebateSynthesizer extends BaseAgent<{ bullish: BullishResearch; bea
 
   public async run(
     input: { bullish: BullishResearch; bearish: BearishResearch },
-    ctx: AgentContext
+    ctx: AgentContext,
   ): Promise<DebateOutput> {
-    const bullishScore = input.bullish.arguments.length * 0.2 + input.bullish.confidence;
-    const bearishScore = input.bearish.arguments.length * 0.2 + input.bearish.confidence;
+    const bullishScore = input.bullish.thesis.length * 0.2 + input.bullish.confidence.effective_confidence;
+    const bearishScore = input.bearish.thesis.length * 0.2 + input.bearish.confidence.effective_confidence;
     const diff = bullishScore - bearishScore;
 
-    const final_bias = diff > 0.2 ? "bullish" : diff < -0.2 ? "bearish" : "neutral";
+    const finalBias = diff > 0.2 ? "bullish" : diff < -0.2 ? "bearish" : "neutral";
+    const expectedMove = round(
+      finalBias === "bullish"
+        ? input.bullish.expected_move_pct
+        : finalBias === "bearish"
+          ? input.bearish.expected_move_pct
+          : 0,
+      3,
+    );
+    const decisionStability = Math.abs(diff) > 0.55 ? "high" : Math.abs(diff) > 0.25 ? "medium" : "low";
 
     const output: DebateOutput = {
-      bullish_arguments: input.bullish.arguments,
-      bearish_arguments: input.bearish.arguments,
-      final_bias,
-      confidence: round(clamp(0.45 + Math.abs(diff) * 0.2, 0.2, 0.95), 3)
+      bullish_thesis: input.bullish.thesis,
+      bearish_thesis: input.bearish.thesis,
+      final_bias: finalBias,
+      dominant_horizon: finalBias === "neutral" ? "intraday" : (finalBias === "bullish" ? input.bullish.time_horizon : input.bearish.time_horizon),
+      expected_move_pct: expectedMove,
+      key_disagreement: finalBias === "neutral"
+        ? "Bull and bear thesis strength are balanced."
+        : "Direction confidence diverges between opposing thesis.",
+      must_monitor_conditions: [
+        ...input.bullish.invalidation_triggers.slice(0, 2),
+        ...input.bearish.invalidation_triggers.slice(0, 2),
+      ],
+      invalidation_triggers: finalBias === "bullish"
+        ? input.bullish.invalidation_triggers
+        : finalBias === "bearish"
+          ? input.bearish.invalidation_triggers
+          : [...input.bullish.invalidation_triggers, ...input.bearish.invalidation_triggers],
+      decision_stability: decisionStability,
+      confidence: buildConfidence(
+        clamp(0.45 + Math.abs(diff) * 0.2, 0.2, 0.95),
+        clamp((input.bullish.confidence.data_quality_confidence + input.bearish.confidence.data_quality_confidence) / 2, 0, 1),
+        clamp((input.bullish.confidence.model_reliability + input.bearish.confidence.model_reliability) / 2, 0, 1),
+      ),
     };
 
-    await this.logDecision(ctx, input, output, "Compared weighted thesis strength and synthesized a single portfolio bias.");
+    await this.logDecision(ctx, input, output, "Compared weighted thesis strength and synthesized a structured portfolio bias.");
     return output;
   }
 }

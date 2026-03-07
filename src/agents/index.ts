@@ -3,4 +3,7 @@ export * from "./researchers";
 export * from "./trader";
 export * from "./risk-manager";
 export * from "./portfolio-manager";
+export * from "./evidence-normalizer";
+export * from "./execution-controller";
+export * from "./post-trade-evaluator";
 export * from "./journaling";

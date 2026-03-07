@@ -34,6 +34,7 @@
     "@langchain/core": "^1.1.30",
     "@langchain/langgraph": "^1.2.0",
     "@langchain/openai": "^1.2.12",
+    "@nirholas/crypto-news": "^1.0.0",
     "better-sqlite3": "^12.4.1",
     "ccxt": "^4.5.19",
     "commander": "^14.0.3",

@@ -6,14 +6,14 @@ import type {
   OrderFillEvent,
   PnLSnapshot,
   Position,
-  TradeProposal
+  ProposalDecision
 } from "../types";
 import { round } from "../utils/common";
 import { BaseAgent } from "../agents/base";
 
 export interface ExchangeInput {
   decision: ExecutionDecision;
-  proposal: TradeProposal;
+  proposal: ProposalDecision;
   marketPrice: number;
 }
 
@@ -40,7 +40,7 @@ export class SimulatedExchange extends BaseAgent<ExchangeInput, ExecutionReport>
   }
 
   public async run(input: ExchangeInput, ctx: AgentContext): Promise<ExecutionReport> {
-    if (!input.decision.approve || !input.decision.execution_instructions) {
+    if (input.proposal.proposal_type === "no_trade" || !input.decision.portfolio_approved || !input.decision.executable || !input.decision.execution_instructions) {
       const report: ExecutionReport = {
         decision: input.decision,
         filled: false,
@@ -73,7 +73,7 @@ export class SimulatedExchange extends BaseAgent<ExchangeInput, ExecutionReport>
     const filledNotional = round(requestedNotional * fillRatio, 2);
     const remainingNotional = round(requestedNotional - filledNotional, 2);
 
-    const direction = input.proposal.side === "long" ? 1 : -1;
+    const direction = input.proposal.proposal_type === "trade" && input.proposal.side === "short" ? -1 : 1;
     const slippagePct = (this.config.slippageBps / 10000) * direction;
     const fillPrice = round(input.marketPrice * (1 + slippagePct), 6);
     const feeUsd = round((filledNotional * this.config.feeBps) / 10000, 6);
@@ -122,7 +122,7 @@ export class SimulatedExchange extends BaseAgent<ExchangeInput, ExecutionReport>
     if (filledNotional > 0) {
       this.position = {
         asset: input.proposal.asset,
-        side: input.proposal.side,
+        side: input.proposal.proposal_type === "trade" ? input.proposal.side : "long",
         quantityNotionalUsd: round(filledNotional - feeUsd, 2),
         avgEntry: fillPrice
       };
@@ -153,12 +153,14 @@ export class SimulatedExchange extends BaseAgent<ExchangeInput, ExecutionReport>
     return report;
   }
 
-  private computeFillRatio(proposal: TradeProposal, requestedNotional: number): number {
+  private computeFillRatio(proposal: ProposalDecision, requestedNotional: number): number {
     if (!this.config.partialFillEnabled) {
       return requestedNotional > 0 ? 1 : 0;
     }
 
-    const sizePenalty = Math.min(0.4, Math.max(0, proposal.position_size_pct / 100));
+    const sizePenalty = proposal.proposal_type === "trade"
+      ? Math.min(0.4, Math.max(0, proposal.suggested_position_size_pct_equity / 100))
+      : 0.4;
     const baseline = 0.95 - sizePenalty;
     return Math.max(0.25, Math.min(1, round(baseline, 4)));
   }

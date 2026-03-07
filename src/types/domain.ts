@@ -180,6 +180,10 @@ export interface NewsEvent {
   impact: "bullish" | "bearish" | "neutral";
   severity: number;
   url?: string;
+  published_at?: string;
+  recency_hours?: number;
+  relevance_score?: number;
+  market_relevance?: "btc_direct" | "crypto_thematic" | "macro";
 }
 
 export interface MarketSnapshot {
@@ -189,26 +193,34 @@ export interface MarketSnapshot {
   sentimentSignals: SentimentSignal[];
   newsEvents: NewsEvent[];
   lastPrice: number;
+  market_constraints?: {
+    min_notional_usd?: number;
+    precision_step?: number;
+    source: "exchange" | "fallback_env";
+  };
   providerStatus: ProviderFetchResult<JSONValue>[];
 }
 
 export interface FundamentalsAnalysis {
   intrinsic_valuation_bias: "undervalued" | "fair" | "overvalued";
   red_flags: string[];
-  confidence: number;
+  confidence: ConfidenceVector;
+  evidence: EvidenceItem[];
 }
 
 export interface SentimentAnalysis {
   sentiment_score: number;
   mood: "fearful" | "neutral" | "optimistic";
-  confidence: number;
+  confidence: ConfidenceVector;
+  evidence: EvidenceItem[];
 }
 
 export interface NewsAnalysis {
   event_impact: "bullish" | "bearish" | "neutral";
   affected_sectors: string[];
   severity: number;
-  confidence: number;
+  confidence: ConfidenceVector;
+  evidence: EvidenceItem[];
 }
 
 export type TechnicalDirection = "buy" | "sell" | "hold";
@@ -216,6 +228,27 @@ export type TrendState = "up" | "down" | "sideways";
 export type StructureState = "bullish" | "bearish" | "neutral";
 export type RegimeState = "low_vol" | "trend" | "high_vol_news";
 export type ConfidenceBucket = "low" | "medium" | "high";
+export type EvidenceHorizon = "scalp" | "intraday" | "swing" | "position";
+export type DecisionStability = "low" | "medium" | "high";
+export type RiskBand = "low" | "medium" | "medium_high" | "high";
+export type RiskAction = "approve" | "reduce" | "reject";
+
+export interface ConfidenceVector {
+  signal_confidence: number;
+  data_quality_confidence: number;
+  model_reliability: number;
+  effective_confidence: number;
+}
+
+export interface EvidenceItem {
+  summary: string;
+  evidence_source: string[];
+  causal_tag: string;
+  time_horizon: EvidenceHorizon;
+  novelty_score: number;
+  dependency_group: string;
+  weight: number;
+}
 
 export interface TechnicalFeatures {
   rsi14: number;
@@ -291,6 +324,7 @@ export interface SignalAnalysis {
   calibrated_probability: number;
   confidence_bucket: ConfidenceBucket;
   composite_score: number;
+  confidence: ConfidenceVector;
 }
 
 export interface LegacyTechnicalSnapshot {
@@ -316,6 +350,7 @@ export interface TechnicalAnalysis {
   confirmation: ConfirmationAnalysis;
   signals: SignalAnalysis;
   shadow: ShadowComparison;
+  evidence: EvidenceItem[];
 }
 
 export interface AnalystBundle {
@@ -323,39 +358,90 @@ export interface AnalystBundle {
   sentiment: SentimentAnalysis;
   news: NewsAnalysis;
   technical: TechnicalAnalysis;
+  normalized_evidence: EvidenceItem[];
+  dependency_overlap_score: number;
+  data_quality: DataQualityContext;
+}
+
+export interface DataQualityContext {
+  market_data_freshness_sec: number;
+  news_data_quality: "low" | "medium" | "high";
+  sentiment_data_quality: "low" | "medium" | "high";
+  provider_health_score: number;
+  degraded_providers: string[];
 }
 
 export interface BullishResearch {
-  arguments: string[];
-  risk_or_reward_estimate_pct: number;
-  failure_modes: string[];
-  confidence: number;
+  thesis: string[];
+  expected_move_pct: number;
+  time_horizon: EvidenceHorizon;
+  invalidation_triggers: string[];
+  confidence: ConfidenceVector;
 }
 
 export interface BearishResearch {
-  arguments: string[];
-  risk_or_reward_estimate_pct: number;
-  failure_modes: string[];
-  confidence: number;
+  thesis: string[];
+  expected_move_pct: number;
+  time_horizon: EvidenceHorizon;
+  invalidation_triggers: string[];
+  confidence: ConfidenceVector;
 }
 
 export interface DebateOutput {
-  bullish_arguments: string[];
-  bearish_arguments: string[];
+  bullish_thesis: string[];
+  bearish_thesis: string[];
   final_bias: "bullish" | "bearish" | "neutral";
-  confidence: number;
+  dominant_horizon: EvidenceHorizon;
+  expected_move_pct: number;
+  key_disagreement: string;
+  must_monitor_conditions: string[];
+  invalidation_triggers: string[];
+  decision_stability: DecisionStability;
+  confidence: ConfidenceVector;
+}
+
+export interface NoTradeDecision {
+  no_trade: true;
+  reasons: string[];
+  dominant_horizon: EvidenceHorizon;
+  confidence: ConfidenceVector;
+  must_monitor_conditions: string[];
 }
 
 export interface TradeProposal {
+  proposal_type: "trade";
   asset: string;
   side: "long" | "short";
   entry: number;
   stop_loss: number;
-  take_profit: number;
-  position_size_pct: number;
-  timeframe: string;
-  reasoning: string;
+  take_profit_targets: number[];
+  suggested_position_size_pct_equity: number;
+  input_timeframe: string;
+  decision_horizon: EvidenceHorizon;
+  expected_holding_period_hours: number;
+  risk_reward_ratio: number;
+  stop_distance_pct: number;
+  take_profit_distance_pct: number;
+  structural_invalidation_level: number;
+  thesis: string[];
+  entry_rationale: string;
+  stop_loss_rationale: string;
+  take_profit_rationale: string;
+  invalid_if: string[];
+  confidence: ConfidenceVector;
 }
+
+export interface NoTradeProposal {
+  proposal_type: "no_trade";
+  asset: string;
+  input_timeframe: string;
+  decision_horizon: EvidenceHorizon;
+  reasons: string[];
+  must_monitor_conditions: string[];
+  confidence: ConfidenceVector;
+}
+
+export type ProposalDecision = TradeProposal | NoTradeProposal;
 
 export interface RiskRules {
   maxRiskPerTradePct: number;
@@ -370,12 +456,23 @@ export interface PortfolioState {
   currentExposurePct: number;
   currentDrawdownPct: number;
   liquidityUsd: number;
+  remaining_risk_budget_pct?: number;
+  current_asset_exposure_pct?: number;
+  cluster_exposure_pct?: number;
+  portfolio_mode?: "risk_on" | "neutral" | "risk_off";
+  restricted_assets?: string[];
+  max_additional_allocation_pct?: number;
 }
 
 export interface RiskDecision {
+  action: RiskAction;
   approved: boolean;
-  adjusted_position_size_pct: number;
-  risk_score: number;
+  approved_position_size_pct_equity: number;
+  risk_score_raw: number;
+  risk_score_normalized: number;
+  risk_band: RiskBand;
+  evaluation_state: "evaluated" | "not_applicable";
+  binding_constraints: string[];
   reasons: string[];
 }
 
@@ -384,11 +481,26 @@ export interface ExecutionInstruction {
   tif: "IOC" | "GTC";
   side: "buy" | "sell";
   quantity_notional_usd: number;
+  min_notional_usd?: number;
+  precision_step?: number;
+  metadata_source?: "exchange" | "fallback_env";
+}
+
+export interface PortfolioDecision {
+  approved: boolean;
+  approved_position_size_pct_equity: number;
+  approved_notional_usd: number;
+  concentration_check: "pass" | "fail" | "not_applicable";
+  correlation_check: "pass" | "fail" | "not_applicable";
+  reserve_cash_check: "pass" | "fail" | "not_applicable";
+  reasons: string[];
 }
 
 export interface ExecutionDecision {
-  approve: boolean;
-  capital_allocated: number;
+  portfolio_approved: boolean;
+  executable: boolean;
+  approved_notional_usd: number;
+  execution_blocker: string | null;
   execution_instructions: ExecutionInstruction | null;
   reasons: string[];
 }
@@ -430,6 +542,25 @@ export interface ExecutionReport {
   position: Position | null;
   pnl: PnLSnapshot;
   execution_details?: ExecutionDetails;
+}
+
+export interface PostTradeEvaluation {
+  evaluation_type: "trade" | "no_trade";
+  slippage_vs_expected_bps: number;
+  entry_quality_score: number | null;
+  stop_placement_quality_score: number | null;
+  tp_realism_score: number | null;
+  proposal_to_fill_delay_ms: number;
+  realized_risk_vs_predicted: number;
+  thesis_outcome: "success" | "failed" | "inconclusive";
+  abstention_quality_score: number | null;
+  missed_opportunity_score: number | null;
+  calibration_signals: Array<{
+    agent: string;
+    expected_confidence: number;
+    outcome_score: number;
+    regime: RegimeState;
+  }>;
 }
 
 export interface AgentContext {
@@ -531,7 +662,9 @@ export interface EffectiveConfigView {
 export type JournalingEventType =
   | "proposal_created"
   | "risk_evaluated"
+  | "portfolio_decided"
   | "execution_decided"
+  | "post_trade_evaluated"
   | "run_summarized";
 
 export interface JournalingRequestMeta {

@@ -3,10 +3,13 @@ import {
   BearishResearcher,
   BullishResearcher,
   DebateSynthesizer,
+  EvidenceNormalizer,
+  ExecutionController,
   FundamentalsAnalyst,
   NewsAnalyst,
   JournalingAgent,
   PortfolioManager,
+  PostTradeEvaluator,
   RiskManager,
   SentimentAnalyst,
   TechnicalAnalyst,
@@ -18,6 +21,7 @@ import { loadRuntimeConfigWithMeta } from "./core/env";
 import { InMemoryEventStore, SqliteEventStorePersistence } from "./core/event-store";
 import { HealthServer } from "./core/health-server";
 import { HealthMonitor } from "./core/health";
+import { SqliteCalibrationStore } from "./core/calibration-store";
 import { LLMRunner } from "./core/llm-runner";
 import { HttpJournalingClient } from "./core/journaling";
 import type { PipelineRunResult } from "./core/pipeline";
@@ -173,9 +177,10 @@ export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => 
 
   const marketDataProvider = createModeDataProvider(mode, {
     strictRealMode: runtime.strictRealMode,
-    theNewsApiKey: runtime.theNewsApiKey,
+    newsApiKey: runtime.newsApiKey,
     coinGeckoApiKey: runtime.coinGeckoApiKey,
-    theNewsApiBaseUrl: runtime.theNewsApiBaseUrl,
+    cryptocurrencyCvBaseUrl: runtime.cryptocurrencyCvBaseUrl,
+    newsApiBaseUrl: runtime.newsApiBaseUrl,
     alternativeMeBaseUrl: runtime.alternativeMeBaseUrl,
     coinGeckoBaseUrl: runtime.coinGeckoBaseUrl,
     providerCacheTtlSeconds: runtime.providerCacheTtlSeconds,
@@ -225,6 +230,7 @@ export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => 
     runTimeoutMs: runtime.runTimeoutMs,
     nodeTimeoutMs: runtime.nodeTimeoutMs,
     mode,
+    calibrationStore: runtime.obsPersistEnabled ? new SqliteCalibrationStore(runtime.obsSqlitePath) : undefined,
     contextFactory: (input, trace) => ({
       runId: input.runId,
       traceId: trace,
@@ -243,6 +249,9 @@ export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => 
       traderAgent: new TraderAgent(eventStore),
       riskManager: new RiskManager(eventStore),
       portfolioManager: new PortfolioManager(eventStore),
+      evidenceNormalizer: new EvidenceNormalizer(eventStore),
+      executionController: new ExecutionController(eventStore),
+      postTradeEvaluator: new PostTradeEvaluator(eventStore),
       simulatedExchange: new SimulatedExchange(eventStore, {
         feeBps: runtime.simFeeBps,
         slippageBps: runtime.simSlippageBps,

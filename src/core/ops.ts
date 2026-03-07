@@ -96,12 +96,13 @@ export class TimeoutBudget {
   }
 
   public remainingMs(): number {
-    if (this.totalMs <= 0) return Number.MAX_SAFE_INTEGER;
+    if (this.totalMs <= 0) return 0;
     const elapsed = this.nowMs() - this.startedAtMs;
     return Math.max(0, this.totalMs - elapsed);
   }
 
   public assertRemaining(step: string): void {
+    if (this.totalMs <= 0) return;
     if (this.remainingMs() <= 0) {
       throw new Error(`TIMEOUT_BUDGET_EXHAUSTED: ${step}`);
     }

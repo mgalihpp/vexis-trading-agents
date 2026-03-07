@@ -404,7 +404,8 @@ const resolveRuntimeConfig = (
     binance_api_key: maskSecret(runtime.binanceApiKey),
     binance_api_secret: maskSecret(runtime.binanceApiSecret),
     openrouter_api_key: maskSecret(runtime.openRouterApiKey),
-    thenewsapi_key: maskSecret(runtime.theNewsApiKey)
+    cryptocurrency_cv_base_url: runtime.cryptocurrencyCvBaseUrl,
+    newsapi_key: maskSecret(runtime.newsApiKey)
   };
 
   const source: Record<string, "flag" | "env" | "default"> = {
@@ -461,7 +462,8 @@ const resolveRuntimeConfig = (
     binance_api_key: envOrDefault("BINANCE_API_KEY"),
     binance_api_secret: envOrDefault("BINANCE_API_SECRET"),
     openrouter_api_key: envOrDefault("OPENROUTER_API_KEY"),
-    thenewsapi_key: envOrDefault("THENEWSAPI_KEY")
+    cryptocurrency_cv_base_url: envOrDefault("CRYPTOCURRENCY_CV_BASE_URL"),
+    newsapi_key: envOrDefault("NEWSAPI_KEY")
   };
 
   return { runtime, view: { effective, source } };
@@ -537,9 +539,6 @@ const doDoctor = (runtime: RuntimeConfig, mode: PipelineMode): CliCommandResult 
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  if (runtime.strictRealMode && mode !== "backtest" && !runtime.theNewsApiKey) {
-    errors.push("THENEWSAPI_KEY missing while STRICT_REAL_MODE=true.");
-  }
   if (runtime.strictRealMode && !runtime.openRouterApiKey) {
     errors.push("OPENROUTER_API_KEY missing while STRICT_REAL_MODE=true.");
   }

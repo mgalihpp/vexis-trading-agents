@@ -1,4 +1,6 @@
 import ccxt, { type Exchange } from "ccxt";
+import path from "node:path";
+import { createRequire } from "node:module";
 import backtestCandles from "../../data/backtest-candles.json";
 import type {
   FundamentalsData,
@@ -45,11 +47,37 @@ interface CacheEntry<T> {
   value: ProviderFetchResult<T>;
 }
 
+interface CryptoNewsArticle {
+  title: string;
+  link: string;
+  description?: string;
+  pubDate: string;
+}
+
+interface CryptoNewsClient {
+  getLatest(limit?: number): Promise<CryptoNewsArticle[]>;
+  search(keywords: string, limit?: number): Promise<CryptoNewsArticle[]>;
+}
+
+const requireFromEsm = createRequire(import.meta.url);
+const createCryptoNewsClient = (baseUrl: string, timeout: number, fetchFn: typeof fetch): CryptoNewsClient => {
+  const sdkPath = path.resolve(process.cwd(), "node_modules", "@nirholas", "crypto-news", "dist", "index.cjs");
+  const sdk = requireFromEsm(sdkPath) as {
+    CryptoNews: new (options?: { baseUrl?: string; timeout?: number; fetch?: typeof fetch }) => CryptoNewsClient;
+  };
+  return new sdk.CryptoNews({
+    baseUrl,
+    timeout,
+    fetch: fetchFn,
+  });
+};
+
 export interface RealDataProviderConfig {
   strictRealMode: boolean;
-  theNewsApiKey: string;
+  newsApiKey: string;
   coinGeckoApiKey: string;
-  theNewsApiBaseUrl: string;
+  cryptocurrencyCvBaseUrl: string;
+  newsApiBaseUrl: string;
   alternativeMeBaseUrl: string;
   coinGeckoBaseUrl: string;
   providerCacheTtlSeconds?: number;
@@ -59,6 +87,11 @@ export interface RealDataProviderConfig {
   marketFetcher?: (query: MarketDataQuery) => Promise<{
     candles: OHLCVCandle[];
     lastPrice: number;
+    marketConstraints?: {
+      min_notional_usd?: number;
+      precision_step?: number;
+      source: "exchange" | "fallback_env";
+    };
     status: ProviderFetchResult<{ asset: string; timeframe: string }>;
   }>;
   telemetrySink?: TelemetrySink;
@@ -114,12 +147,20 @@ const defaultBacktestNewsEvents = (): NewsEvent[] => [
     sector: "crypto",
     impact: "bullish",
     severity: 0.7,
+    published_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    recency_hours: 2,
+    relevance_score: 0.78,
+    market_relevance: "btc_direct",
   },
   {
     title: "Regulatory hearing scheduled",
     sector: "crypto",
     impact: "neutral",
     severity: 0.4,
+    published_at: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+    recency_hours: 6,
+    relevance_score: 0.55,
+    market_relevance: "crypto_thematic",
   },
 ];
 
@@ -363,7 +404,103 @@ class AlternativeMeSentimentProvider implements SentimentProvider {
   }
 }
 
-class TheNewsApiProvider implements NewsProvider {
+class CryptocurrencyCvNewsProvider implements NewsProvider {
+  private readonly client: CryptoNewsClient;
+
+  public constructor(
+    private readonly baseUrl: string,
+    private readonly fetchFn: typeof fetch,
+    private readonly governor: RateLimitGovernor,
+    private readonly timeoutMs: number,
+  ) {
+    this.client = createCryptoNewsClient(this.baseUrl, this.timeoutMs, this.fetchFn);
+  }
+
+  public async fetch(asset: string): Promise<ProviderFetchResult<NewsEvent[]>> {
+    await this.governor.waitTurn("cryptocurrency-cv");
+    const symbol = asset.split("/")[0]?.toUpperCase() ?? asset.toUpperCase();
+
+    const keywordMap: Record<string, string> = {
+      BTC: "bitcoin",
+      ETH: "ethereum",
+      SOL: "solana",
+      BNB: "binance",
+      XRP: "xrp",
+      ADA: "cardano",
+    };
+    const keyword = keywordMap[symbol] ?? symbol.toLowerCase();
+
+    const started = Date.now();
+    const latest = await withTimeout(
+      this.client.getLatest(25),
+      this.timeoutMs,
+      "PROVIDER_TIMEOUT:cryptocurrency-cv",
+    );
+    const searched = await withTimeout(
+      this.client.search(`${keyword},crypto`, 25),
+      this.timeoutMs,
+      "PROVIDER_TIMEOUT:cryptocurrency-cv",
+    );
+    const latencyMs = Date.now() - started;
+
+    const mergedArticles = [...latest, ...searched];
+    const unique = new Map<string, CryptoNewsArticle>();
+    for (const article of mergedArticles) {
+      const key = `${article.title.trim().toLowerCase()}|${article.pubDate ?? ""}`;
+      if (!unique.has(key)) unique.set(key, article);
+    }
+
+    const events: NewsEvent[] = [...unique.values()].slice(0, 25).map((article) => {
+      const title = String(article.title ?? "Untitled");
+      const desc = String(article.description ?? "");
+      const text = `${title} ${desc}`.toLowerCase();
+      const publishedAt = typeof article.pubDate === "string" ? article.pubDate : undefined;
+      const recencyHours = publishedAt
+        ? Math.max(0, (Date.now() - new Date(publishedAt).getTime()) / (1000 * 60 * 60))
+        : undefined;
+      const relevanceScore = clamp(
+        (text.includes(symbol.toLowerCase()) ? 0.45 : 0.2) +
+        (text.includes("bitcoin") || text.includes("btc") ? 0.25 : 0) +
+        (text.includes("crypto") ? 0.15 : 0),
+        0,
+        1,
+      );
+      const score =
+        (text.includes("surge") ||
+        text.includes("adoption") ||
+        text.includes("approval")
+          ? 0.3
+          : 0) +
+        (text.includes("ban") ||
+        text.includes("hack") ||
+        text.includes("lawsuit")
+          ? -0.35
+          : 0);
+
+      return {
+        title,
+        sector: "crypto",
+        impact: classifyImpact(score),
+        severity: round(clamp(Math.abs(score) + 0.35, 0.2, 0.95), 3),
+        url: typeof article.link === "string" ? article.link : undefined,
+        published_at: publishedAt,
+        recency_hours: recencyHours ? round(recencyHours, 3) : undefined,
+        relevance_score: round(relevanceScore, 4),
+        market_relevance: relevanceScore > 0.6 ? "btc_direct" : relevanceScore > 0.35 ? "crypto_thematic" : "macro",
+      };
+    });
+
+    return toStatus({
+      provider: "cryptocurrency-cv",
+      statusCode: 200,
+      latencyMs,
+      recordCount: events.length,
+      data: events,
+    });
+  }
+}
+
+class NewsApiOrgProvider implements NewsProvider {
   public constructor(
     private readonly apiKey: string,
     private readonly baseUrl: string,
@@ -373,36 +510,52 @@ class TheNewsApiProvider implements NewsProvider {
   ) {}
 
   public async fetch(asset: string): Promise<ProviderFetchResult<NewsEvent[]>> {
-    await this.governor.waitTurn("thenewsapi");
+    await this.governor.waitTurn("newsapi");
     const symbol = asset.split("/")[0]?.toUpperCase() ?? asset.toUpperCase();
-    const url = `${this.baseUrl}/all?api_token=${encodeURIComponent(this.apiKey)}&search=${encodeURIComponent(`${symbol} OR crypto`)}&language=en&limit=10`;
+    const url = `${this.baseUrl}/everything?q=${encodeURIComponent(`${symbol} OR crypto`)}` +
+      `&language=en&pageSize=20&sortBy=publishedAt`;
 
     const started = Date.now();
     const response = await withTimeout(
-      this.fetchFn(url),
+      this.fetchFn(url, { headers: { "X-Api-Key": this.apiKey } }),
       this.timeoutMs,
-      "PROVIDER_TIMEOUT:thenewsapi",
+      "PROVIDER_TIMEOUT:newsapi",
     );
     const latencyMs = Date.now() - started;
 
     if (!response.ok) {
       throw new ProviderError(
-        "thenewsapi",
+        "newsapi",
         response.status,
-        "THENEWSAPI_HTTP_ERROR",
-        `TheNewsAPI request failed (${response.status})`,
+        "NEWSAPI_HTTP_ERROR",
+        `NewsAPI request failed (${response.status})`,
       );
     }
 
     const raw = (await response.json()) as Record<string, unknown>;
-    const rows = Array.isArray(raw.data)
-      ? (raw.data as Array<Record<string, unknown>>)
+    const rows = Array.isArray(raw.articles)
+      ? (raw.articles as Array<Record<string, unknown>>)
       : [];
 
-    const events: NewsEvent[] = rows.slice(0, 8).map((article) => {
+    const events: NewsEvent[] = rows.slice(0, 20).map((article) => {
       const title = String(article.title ?? "Untitled");
-      const desc = String(article.description ?? article.snippet ?? "");
+      const desc = String(article.description ?? "");
       const text = `${title} ${desc}`.toLowerCase();
+      const publishedAt = typeof article.publishedAt === "string"
+        ? article.publishedAt
+        : typeof article.published_at === "string"
+          ? article.published_at
+          : undefined;
+      const recencyHours = publishedAt
+        ? Math.max(0, (Date.now() - new Date(publishedAt).getTime()) / (1000 * 60 * 60))
+        : undefined;
+      const relevanceScore = clamp(
+        (text.includes(symbol.toLowerCase()) ? 0.45 : 0.2) +
+        (text.includes("bitcoin") || text.includes("btc") ? 0.25 : 0) +
+        (text.includes("crypto") ? 0.15 : 0),
+        0,
+        1,
+      );
       const score =
         (text.includes("surge") ||
         text.includes("adoption") ||
@@ -421,11 +574,15 @@ class TheNewsApiProvider implements NewsProvider {
         impact: classifyImpact(score),
         severity: round(clamp(Math.abs(score) + 0.35, 0.2, 0.95), 3),
         url: typeof article.url === "string" ? article.url : undefined,
+        published_at: publishedAt,
+        recency_hours: recencyHours ? round(recencyHours, 3) : undefined,
+        relevance_score: round(relevanceScore, 4),
+        market_relevance: relevanceScore > 0.6 ? "btc_direct" : relevanceScore > 0.35 ? "crypto_thematic" : "macro",
       };
     });
 
     return toStatus({
-      provider: "thenewsapi",
+      provider: "newsapi",
       statusCode: response.status,
       latencyMs,
       recordCount: events.length,
@@ -481,7 +638,8 @@ export class RealCryptoDataProvider implements MarketDataProvider {
   private readonly nowMs: () => number;
   private readonly fundamentalsProvider: CoinGeckoFundamentalsProvider;
   private readonly sentimentProvider: AlternativeMeSentimentProvider;
-  private readonly newsProvider: TheNewsApiProvider;
+  private readonly cryptocurrencyCvProvider: CryptocurrencyCvNewsProvider;
+  private readonly newsApiOrgProvider: NewsApiOrgProvider;
   private readonly marketFetcher?: RealDataProviderConfig["marketFetcher"];
   private readonly telemetrySink: TelemetrySink;
   private readonly healthMonitor?: HealthMonitor;
@@ -555,9 +713,15 @@ export class RealCryptoDataProvider implements MarketDataProvider {
       this.governor,
       this.timeoutMs,
     );
-    this.newsProvider = new TheNewsApiProvider(
-      config.theNewsApiKey,
-      config.theNewsApiBaseUrl,
+    this.cryptocurrencyCvProvider = new CryptocurrencyCvNewsProvider(
+      config.cryptocurrencyCvBaseUrl,
+      this.fetchFn,
+      this.governor,
+      this.timeoutMs,
+    );
+    this.newsApiOrgProvider = new NewsApiOrgProvider(
+      config.newsApiKey,
+      config.newsApiBaseUrl,
       this.fetchFn,
       this.governor,
       this.timeoutMs,
@@ -589,7 +753,17 @@ export class RealCryptoDataProvider implements MarketDataProvider {
 
     const market = await this.fetchMarket(query);
 
-    const [fundamentalsResult, sentimentResult, newsResult] = await Promise.all(
+    const disabledNewsStatus = (provider: string): ProviderFetchResult<NewsEvent[]> => ({
+      provider,
+      ok: true,
+      statusCode: 204,
+      latencyMs: 0,
+      recordCount: 0,
+      data: [],
+      message: "disabled: missing api key",
+    });
+
+    const [fundamentalsResult, sentimentResult, cryptocurrencyCvResult, newsApiResult] = await Promise.all(
       [
         this.resolveWithPolicy(
           `fundamentals:${query.asset}`,
@@ -612,14 +786,24 @@ export class RealCryptoDataProvider implements MarketDataProvider {
           ],
         ),
         this.resolveWithPolicy(
-          `news:${query.asset}`,
+          `news:cryptocurrency-cv:${query.asset}`,
           this.ttlMs.news,
-          () => this.newsProvider.fetch(query.asset),
-          "thenewsapi",
+          () => this.cryptocurrencyCvProvider.fetch(query.asset),
+          "cryptocurrency-cv",
           [],
         ),
+        this.config.newsApiKey
+          ? this.resolveWithPolicy(
+            `news:newsapi:${query.asset}`,
+            this.ttlMs.news,
+            () => this.newsApiOrgProvider.fetch(query.asset),
+            "newsapi",
+            [],
+          )
+          : Promise.resolve(disabledNewsStatus("newsapi")),
       ],
     );
+    const newsResult = this.mergeNewsResults(cryptocurrencyCvResult, newsApiResult);
 
     await this.telemetrySink.emitMetric({
       name: "provider_fetch_bundle_latency_ms",
@@ -632,6 +816,7 @@ export class RealCryptoDataProvider implements MarketDataProvider {
       asset: query.asset,
       candles: market.candles,
       lastPrice: market.lastPrice,
+      market_constraints: market.marketConstraints,
       fundamentals: fundamentalsResult.data,
       sentimentSignals: sentimentResult.data,
       newsEvents: newsResult.data,
@@ -639,7 +824,8 @@ export class RealCryptoDataProvider implements MarketDataProvider {
         market.status,
         fundamentalsResult,
         sentimentResult,
-        newsResult,
+        cryptocurrencyCvResult,
+        newsApiResult,
       ],
     };
   }
@@ -669,14 +855,32 @@ export class RealCryptoDataProvider implements MarketDataProvider {
   }
 
   private ensureRequiredKeys(): void {
-    if (!this.config.theNewsApiKey) {
-      throw new ProviderError(
-        "thenewsapi",
-        401,
-        "THENEWSAPI_KEY_MISSING",
-        "THENEWSAPI_KEY is required in strict real mode.",
-      );
+    // newsapi key is optional because cryptocurrency.cv provides public news feed.
+  }
+
+  private mergeNewsResults(
+    a: ProviderFetchResult<NewsEvent[]>,
+    b: ProviderFetchResult<NewsEvent[]>,
+  ): ProviderFetchResult<NewsEvent[]> {
+    const merged = [...a.data, ...b.data];
+    const seen = new Set<string>();
+    const deduped: NewsEvent[] = [];
+    for (const event of merged) {
+      const key = `${event.title.trim().toLowerCase()}|${event.published_at ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(event);
     }
+    deduped.sort((x, y) => (x.recency_hours ?? Number.MAX_SAFE_INTEGER) - (y.recency_hours ?? Number.MAX_SAFE_INTEGER));
+    return {
+      provider: "news-aggregate",
+      ok: a.ok || b.ok,
+      statusCode: a.ok || b.ok ? 200 : Math.max(a.statusCode, b.statusCode),
+      latencyMs: Math.max(a.latencyMs, b.latencyMs),
+      recordCount: deduped.length,
+      data: deduped,
+      message: [a.message, b.message].filter(Boolean).join(" | ") || undefined,
+    };
   }
 
   private tags(
@@ -836,6 +1040,11 @@ export class RealCryptoDataProvider implements MarketDataProvider {
   private async fetchMarket(query: MarketDataQuery): Promise<{
     candles: OHLCVCandle[];
     lastPrice: number;
+    marketConstraints?: {
+      min_notional_usd?: number;
+      precision_step?: number;
+      source: "exchange" | "fallback_env";
+    };
     status: ProviderFetchResult<{ asset: string; timeframe: string }>;
   }> {
     if (this.marketFetcher) {
@@ -873,10 +1082,23 @@ export class RealCryptoDataProvider implements MarketDataProvider {
         const lastPrice =
           ticker.last ?? candles[candles.length - 1]?.close ?? 0;
         const latencyMs = this.nowMs() - started;
+        const market = (this.exchange as unknown as {
+          market?: (symbol: string) => {
+            limits?: { cost?: { min?: number } };
+            precision?: { amount?: number };
+          };
+        }).market?.(query.asset);
+        const minNotionalUsd = Number(market?.limits?.cost?.min ?? 0);
+        const precisionStep = Number(market?.precision?.amount ?? 0);
 
         return {
           candles,
           lastPrice,
+          marketConstraints: {
+            min_notional_usd: Number.isFinite(minNotionalUsd) && minNotionalUsd > 0 ? minNotionalUsd : undefined,
+            precision_step: Number.isFinite(precisionStep) && precisionStep > 0 ? precisionStep : undefined,
+            source: "exchange",
+          },
           status: toStatus({
             provider: "ccxt",
             statusCode: 200,

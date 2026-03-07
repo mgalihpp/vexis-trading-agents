@@ -1,55 +1,61 @@
-﻿import type {
+import type {
   AgentContext,
-  ExecutionDecision,
   EventStore,
+  PortfolioDecision,
   PortfolioState,
+  ProposalDecision,
   RiskDecision,
-  TradeProposal
 } from "../types";
 import { round } from "../utils/common";
 import { BaseAgent } from "./base";
 
 export interface PortfolioInput {
-  proposal: TradeProposal;
+  proposal: ProposalDecision;
   risk: RiskDecision;
   portfolio: PortfolioState;
 }
 
-export class PortfolioManager extends BaseAgent<PortfolioInput, ExecutionDecision> {
+export class PortfolioManager extends BaseAgent<PortfolioInput, PortfolioDecision> {
   public readonly name = "PortfolioManager";
 
   public constructor(eventStore: EventStore) {
     super(eventStore);
   }
 
-  public async run(input: PortfolioInput, ctx: AgentContext): Promise<ExecutionDecision> {
+  public async run(input: PortfolioInput, ctx: AgentContext): Promise<PortfolioDecision> {
     const reasons: string[] = [...input.risk.reasons];
 
     if (!input.risk.approved) {
-      const rejected: ExecutionDecision = {
-        approve: false,
-        capital_allocated: 0,
-        execution_instructions: null,
-        reasons: reasons.length ? reasons : ["Risk manager rejected trade proposal."]
+      const rejected: PortfolioDecision = {
+        approved: false,
+        approved_position_size_pct_equity: 0,
+        approved_notional_usd: 0,
+        concentration_check: input.risk.evaluation_state === "not_applicable" ? "not_applicable" : "fail",
+        correlation_check: input.risk.evaluation_state === "not_applicable" ? "not_applicable" : "fail",
+        reserve_cash_check: "not_applicable",
+        reasons: reasons.length ? reasons : ["Risk manager rejected trade proposal."],
       };
       await this.logDecision(ctx, input, rejected, "Rejected allocation because risk gate did not approve the proposal.");
       return rejected;
     }
 
-    const capital_allocated = round(input.portfolio.equityUsd * (input.risk.adjusted_position_size_pct / 100), 2);
-    const execution: ExecutionDecision = {
-      approve: true,
-      capital_allocated,
-      execution_instructions: {
-        type: "market",
-        tif: "IOC",
-        side: input.proposal.side === "long" ? "buy" : "sell",
-        quantity_notional_usd: capital_allocated
-      },
-      reasons: reasons.length ? reasons : ["Approved within risk and exposure budget."]
+    const remainingBudget = Math.max(0, input.portfolio.max_additional_allocation_pct ?? (100 - input.portfolio.currentExposurePct));
+    const concentrationCap = Math.max(0, 100 - (input.portfolio.cluster_exposure_pct ?? 0));
+    const pct = Math.min(input.risk.approved_position_size_pct_equity, remainingBudget, concentrationCap);
+    const approvedNotional = round(input.portfolio.equityUsd * (pct / 100), 2);
+    const reserveCashOk = input.portfolio.liquidityUsd - approvedNotional >= 0;
+
+    const output: PortfolioDecision = {
+      approved: approvedNotional > 0,
+      approved_position_size_pct_equity: round(pct, 3),
+      approved_notional_usd: approvedNotional,
+      concentration_check: pct <= concentrationCap ? "pass" : "fail",
+      correlation_check: "pass",
+      reserve_cash_check: reserveCashOk ? "pass" : "fail",
+      reasons: reasons.length ? reasons : ["Approved capital allocation under portfolio budget constraints."],
     };
 
-    await this.logDecision(ctx, input, execution, "Allocated capital according to adjusted risk-approved sizing.");
-    return execution;
+    await this.logDecision(ctx, input, output, "Capital allocator only: budget/concentration-aware final notional assignment.");
+    return output;
   }
 }

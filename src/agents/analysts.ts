@@ -1,6 +1,8 @@
 import { ADX, ATR, EMA, MACD, RSI } from "technicalindicators";
 import type {
   ConfidenceBucket,
+  ConfidenceVector,
+  EvidenceItem,
   FundamentalsAnalysis,
   FundamentalsData,
   LegacyTechnicalSnapshot,
@@ -16,6 +18,22 @@ import { clamp, round } from "../utils/common";
 import type { EventStore, AgentContext } from "../types";
 import { BaseAgent } from "./base";
 import { TA_MODEL_ARTIFACT } from "./ta-model.generated";
+
+const buildConfidence = (
+  signalConfidence: number,
+  dataQualityConfidence: number,
+  modelReliability: number,
+): ConfidenceVector => {
+  const signal = clamp(signalConfidence, 0, 1);
+  const data = clamp(dataQualityConfidence, 0, 1);
+  const reliability = clamp(modelReliability, 0, 1);
+  return {
+    signal_confidence: round(signal, 4),
+    data_quality_confidence: round(data, 4),
+    model_reliability: round(reliability, 4),
+    effective_confidence: round(clamp(signal * 0.5 + data * 0.2 + reliability * 0.3, 0, 1), 4),
+  };
+};
 
 export class FundamentalsAnalyst extends BaseAgent<FundamentalsData, FundamentalsAnalysis> {
   public readonly name = "FundamentalsAnalyst";
@@ -44,10 +62,27 @@ export class FundamentalsAnalyst extends BaseAgent<FundamentalsData, Fundamental
     if (input.onChainActivityScore < 0.35) redFlags.push("Weak on-chain activity");
 
     const intrinsic_valuation_bias = score > 18 ? "undervalued" : score < 5 ? "overvalued" : "fair";
+    const scalarConfidence = round(clamp(0.5 + score / 60 - redFlags.length * 0.05, 0.1, 0.95), 3);
+    const evidence: EvidenceItem[] = [
+      {
+        summary: `valuation=${intrinsic_valuation_bias} red_flags=${redFlags.length}`,
+        evidence_source: ["coingecko_fundamentals"],
+        causal_tag: "valuation_quality",
+        time_horizon: "swing",
+        novelty_score: round(clamp(1 - Math.min(redFlags.length, 4) / 4, 0, 1), 4),
+        dependency_group: "fundamental",
+        weight: round(clamp(0.45 + scalarConfidence * 0.45, 0, 1), 4),
+      },
+    ];
     const output: FundamentalsAnalysis = {
       intrinsic_valuation_bias,
       red_flags: redFlags,
-      confidence: round(clamp(0.5 + score / 60 - redFlags.length * 0.05, 0.1, 0.95), 3)
+      confidence: buildConfidence(
+        scalarConfidence,
+        clamp(0.55 + input.onChainActivityScore * 0.4, 0, 1),
+        clamp(0.4 + scalarConfidence * 0.5, 0, 1),
+      ),
+      evidence,
     };
 
     await this.logDecision(ctx, input, output, "Score weighted by growth, leverage, liquidity and valuation multiples.");
@@ -66,10 +101,26 @@ export class SentimentAnalyst extends BaseAgent<SentimentSignal[], SentimentAnal
     const avg = input.length === 0 ? 0 : input.reduce((sum, s) => sum + s.score, 0) / input.length;
     const sentiment_score = round(clamp(avg, -1, 1), 4);
     const mood = sentiment_score > 0.2 ? "optimistic" : sentiment_score < -0.2 ? "fearful" : "neutral";
+    const scalarConfidence = round(clamp(0.5 + Math.abs(sentiment_score) * 0.4, 0.2, 0.9), 3);
     const output: SentimentAnalysis = {
       sentiment_score,
       mood,
-      confidence: round(clamp(0.5 + Math.abs(sentiment_score) * 0.4, 0.2, 0.9), 3)
+      confidence: buildConfidence(
+        scalarConfidence,
+        input.length > 0 ? clamp(0.4 + Math.min(input.length, 6) * 0.08, 0, 1) : 0.2,
+        clamp(0.35 + scalarConfidence * 0.55, 0, 1),
+      ),
+      evidence: [
+        {
+          summary: `mood=${mood} score=${sentiment_score}`,
+          evidence_source: [...new Set(input.map((s) => s.source || "unknown"))],
+          causal_tag: "risk_appetite",
+          time_horizon: "intraday",
+          novelty_score: round(clamp(0.4 + Math.abs(sentiment_score) * 0.5, 0, 1), 4),
+          dependency_group: "sentiment",
+          weight: round(clamp(0.35 + scalarConfidence * 0.55, 0, 1), 4),
+        },
+      ],
     };
 
     await this.logDecision(ctx, input, output, "Computed mean sentiment and mapped score bands to market mood.");
@@ -97,12 +148,28 @@ export class NewsAnalyst extends BaseAgent<NewsEvent[], NewsAnalysis> {
 
     const avgSeverity = input.length ? totalSeverity / input.length : 0;
     const event_impact = net > 0.25 ? "bullish" : net < -0.25 ? "bearish" : "neutral";
+    const scalarConfidence = round(clamp(0.45 + Math.abs(net) * 0.25 + avgSeverity * 0.2, 0.2, 0.9), 3);
 
     const output: NewsAnalysis = {
       event_impact,
       affected_sectors: sectors,
       severity: round(clamp(avgSeverity, 0, 1), 4),
-      confidence: round(clamp(0.45 + Math.abs(net) * 0.25 + avgSeverity * 0.2, 0.2, 0.9), 3)
+      confidence: buildConfidence(
+        scalarConfidence,
+        input.length > 0 ? clamp(0.3 + Math.min(input.length, 8) * 0.07, 0, 1) : 0.15,
+        clamp(0.25 + scalarConfidence * 0.65, 0, 1),
+      ),
+      evidence: [
+        {
+          summary: `impact=${event_impact} severity=${round(clamp(avgSeverity, 0, 1), 3)}`,
+          evidence_source: ["news_aggregate"],
+          causal_tag: "macro_headline",
+          time_horizon: "intraday",
+          novelty_score: round(clamp((1 - Math.min(input.length, 8) / 8) * 0.7 + Math.abs(net) * 0.3, 0, 1), 4),
+          dependency_group: "news",
+          weight: round(clamp(0.35 + avgSeverity * 0.5, 0, 1), 4),
+        },
+      ],
     };
 
     await this.logDecision(ctx, input, output, "Aggregated directional event severity and sector overlap.");
@@ -153,7 +220,18 @@ export class TechnicalAnalyst extends BaseAgent<OHLCVCandle[], TechnicalAnalysis
         enabled: this.shadowMode,
         baseline: legacy,
         agreement: legacy.signal === signals.direction
-      }
+      },
+      evidence: [
+        {
+          summary: `technical_signal=${signals.direction} regime=${regime.state}`,
+          evidence_source: ["ccxt_ohlcv"],
+          causal_tag: "price_action",
+          time_horizon: "intraday",
+          novelty_score: round(clamp(Math.abs(signals.composite_score) / 3, 0, 1), 4),
+          dependency_group: "technical",
+          weight: round(clamp(signals.confidence.effective_confidence, 0.05, 1), 4),
+        },
+      ],
     };
 
     await this.logDecision(
@@ -220,12 +298,24 @@ export class TechnicalAnalyst extends BaseAgent<OHLCVCandle[], TechnicalAnalysis
         calibrated_probability: legacy.confidence,
         confidence_bucket: this.toBucket(legacy.confidence),
         composite_score: 0,
+        confidence: buildConfidence(legacy.confidence, 0.35, 0.56),
       },
       shadow: {
         enabled: this.shadowMode,
         baseline: legacy,
         agreement: true,
       },
+      evidence: [
+        {
+          summary: "insufficient candles fallback",
+          evidence_source: ["ccxt_ohlcv"],
+          causal_tag: "data_sufficiency",
+          time_horizon: "intraday",
+          novelty_score: 0,
+          dependency_group: "technical",
+          weight: 0.1,
+        },
+      ],
     };
   }
 
@@ -599,6 +689,11 @@ export class TechnicalAnalyst extends BaseAgent<OHLCVCandle[], TechnicalAnalysis
       calibrated_probability: calibratedProbability,
       confidence_bucket: confidenceBucket,
       composite_score: compositeScore,
+      confidence: buildConfidence(
+        calibratedProbability,
+        clamp(1 - confirmation.collinearity_risk, 0, 1),
+        regime.state === "high_vol_news" ? 0.52 : 0.68,
+      ),
     };
   }
 

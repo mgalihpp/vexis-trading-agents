@@ -10,9 +10,10 @@ OPENROUTER_MODEL=openai/gpt-4o-mini
 LLM_MAX_RETRIES=2
 LANGSMITH_TRACING=false
 
-THENEWSAPI_KEY=
+NEWSAPI_KEY=
 COINGECKO_API_KEY=
-THENEWSAPI_BASE_URL=https://api.thenewsapi.com/v1/news
+CRYPTOCURRENCY_CV_BASE_URL=https://cryptocurrency.cv
+NEWSAPI_BASE_URL=https://newsapi.org/v2
 ALTERNATIVE_ME_BASE_URL=https://api.alternative.me
 COINGECKO_BASE_URL=https://api.coingecko.com/api/v3
 PROVIDER_CACHE_TTL_SECONDS=300
@@ -93,9 +94,10 @@ export interface RuntimeConfig {
   strictRealMode: boolean;
   showTelemetry: boolean;
   telemetryConsoleMirror: boolean;
-  theNewsApiKey: string;
+  newsApiKey: string;
   coinGeckoApiKey: string;
-  theNewsApiBaseUrl: string;
+  cryptocurrencyCvBaseUrl: string;
+  newsApiBaseUrl: string;
   alternativeMeBaseUrl: string;
   coinGeckoBaseUrl: string;
   providerCacheTtlSeconds: number;
@@ -346,9 +348,10 @@ export const loadRuntimeConfigWithMeta = (options: RuntimeEnvLoadOptions = {}): 
     strictRealMode: asBool(getRaw("STRICT_REAL_MODE"), true),
     showTelemetry: asBool(getRaw("SHOW_TELEMETRY"), false),
     telemetryConsoleMirror: asBool(getRaw("TELEMETRY_CONSOLE"), false),
-    theNewsApiKey: asSecret(getRaw("THENEWSAPI_KEY")),
+    newsApiKey: asSecret(getRaw("NEWSAPI_KEY")),
     coinGeckoApiKey: asSecret(getRaw("COINGECKO_API_KEY")),
-    theNewsApiBaseUrl: getRaw("THENEWSAPI_BASE_URL") ?? "https://api.thenewsapi.com/v1/news",
+    cryptocurrencyCvBaseUrl: getRaw("CRYPTOCURRENCY_CV_BASE_URL") ?? "https://cryptocurrency.cv",
+    newsApiBaseUrl: getRaw("NEWSAPI_BASE_URL") ?? "https://newsapi.org/v2",
     alternativeMeBaseUrl: getRaw("ALTERNATIVE_ME_BASE_URL") ?? "https://api.alternative.me",
     coinGeckoBaseUrl: getRaw("COINGECKO_BASE_URL") ?? "https://api.coingecko.com/api/v3",
     providerCacheTtlSeconds: asInt(getRaw("PROVIDER_CACHE_TTL_SECONDS"), 300),
@@ -416,7 +419,8 @@ export const loadRuntimeConfigWithMeta = (options: RuntimeEnvLoadOptions = {}): 
 
   try {
     cfg.openRouterBaseUrl = asHttpUrl(cfg.openRouterBaseUrl, "OPENROUTER_BASE_URL");
-    cfg.theNewsApiBaseUrl = asHttpUrl(cfg.theNewsApiBaseUrl, "THENEWSAPI_BASE_URL");
+    cfg.cryptocurrencyCvBaseUrl = asHttpUrl(cfg.cryptocurrencyCvBaseUrl, "CRYPTOCURRENCY_CV_BASE_URL");
+    cfg.newsApiBaseUrl = asHttpUrl(cfg.newsApiBaseUrl, "NEWSAPI_BASE_URL");
     cfg.alternativeMeBaseUrl = asHttpUrl(cfg.alternativeMeBaseUrl, "ALTERNATIVE_ME_BASE_URL");
     cfg.coinGeckoBaseUrl = asHttpUrl(cfg.coinGeckoBaseUrl, "COINGECKO_BASE_URL");
     cfg.journalingBaseUrl = asHttpUrl(cfg.journalingBaseUrl, "JOURNALING_BASE_URL");
@@ -466,7 +470,6 @@ export const loadRuntimeConfigWithMeta = (options: RuntimeEnvLoadOptions = {}): 
   }
 
   if (cfg.strictRealMode) {
-    failIf(!cfg.theNewsApiKey, "THENEWSAPI_KEY is required when STRICT_REAL_MODE=true", meta);
     failIf(!cfg.openRouterApiKey, "OPENROUTER_API_KEY is required when STRICT_REAL_MODE=true", meta);
   }
 

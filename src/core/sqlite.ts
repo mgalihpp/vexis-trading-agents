@@ -107,6 +107,21 @@ const initSchema = (db: Database.Database): void => {
 
     CREATE INDEX IF NOT EXISTS idx_protection_groups_status ON protection_groups(status);
     CREATE INDEX IF NOT EXISTS idx_protection_groups_scope_symbol ON protection_groups(scope, symbol);
+
+    CREATE TABLE IF NOT EXISTS calibration_signals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL,
+      trace_id TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      agent TEXT NOT NULL,
+      regime TEXT NOT NULL,
+      expected_confidence REAL NOT NULL,
+      outcome_score REAL NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_calibration_signals_agent ON calibration_signals(agent);
+    CREATE INDEX IF NOT EXISTS idx_calibration_signals_trace ON calibration_signals(trace_id);
+    CREATE INDEX IF NOT EXISTS idx_calibration_signals_time ON calibration_signals(timestamp);
   `);
 
   const columns = db.prepare("PRAGMA table_info(protection_groups)").all() as Array<{ name?: unknown }>;

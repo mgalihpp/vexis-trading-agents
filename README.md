@@ -10,7 +10,7 @@ Pipeline:
 
 - LangGraph orchestration with strict typed JSON contracts.
 - LLM decision nodes (OpenRouter) with retry + fallback.
-- Real crypto inputs (CCXT market, CoinGecko, Alternative.me, TheNewsAPI).
+- Real crypto inputs (CCXT market, CoinGecko, Alternative.me, Cryptocurrency.cv + NewsAPI).
 - Binance account snapshot integration (spot + USD-M + COIN-M).
 - Binance Spot CCXT action pack (live actions, whitelist guarded).
 - Binance Futures CCXT action pack (USD-M + COIN-M, leverage/margin/position pre-setup).
@@ -194,9 +194,10 @@ LLM_MAX_RETRIES=2
 ### Real data providers
 
 ```bash
-THENEWSAPI_KEY=your_key
+NEWSAPI_KEY=your_key
 COINGECKO_API_KEY=optional
-THENEWSAPI_BASE_URL=https://api.thenewsapi.com/v1/news
+CRYPTOCURRENCY_CV_BASE_URL=https://cryptocurrency.cv
+NEWSAPI_BASE_URL=https://newsapi.org/v2
 ALTERNATIVE_ME_BASE_URL=https://api.alternative.me
 COINGECKO_BASE_URL=https://api.coingecko.com/api/v3
 PROVIDER_CACHE_TTL_SECONDS=300
