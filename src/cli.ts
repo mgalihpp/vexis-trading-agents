@@ -8,6 +8,8 @@ import os from "node:os";
 import path from "node:path";
 import { BinanceAccountProvider, StaticPortfolioStateProvider } from "./core/account-state";
 import { BinanceFuturesTradingService } from "./core/futures-trading";
+import { HealthMonitor } from "./core/health";
+import { HealthServer } from "./core/health-server";
 import { BinanceSpotTradingService } from "./core/spot-trading";
 import { InMemoryTelemetrySink, SqliteTelemetrySink } from "./core/telemetry";
 import { ENV_TEMPLATE, loadRuntimeConfigWithMeta, type RuntimeConfig } from "./core/env";
@@ -23,6 +25,7 @@ import type {
   JSONValue,
   OutputFormat,
   PipelineMode,
+  RunnerState,
   SpotOrderRequest,
   SpotTimeInForce
 } from "./types";
@@ -43,6 +46,7 @@ interface RunnerOptions extends CommonRunOptions {
 interface HealthOptions {
   check?: "healthz" | "readyz";
   port?: number;
+  serve?: boolean;
 }
 
 interface EnvInitOptions {
@@ -66,6 +70,8 @@ interface SpotPlaceOptions {
   amount?: number;
   price?: number;
   quoteCost?: number;
+  stopLoss?: number;
+  takeProfit?: number;
   tif?: SpotTimeInForce;
 }
 
@@ -94,12 +100,21 @@ interface SpotQuoteOptions {
   depth?: number;
 }
 
+interface SpotProtectOptions {
+  symbol: string;
+  amount: number;
+  stopLoss?: number;
+  takeProfit?: number;
+}
+
 interface FuturesPlaceOptions {
   scope?: FuturesScope;
   symbol: string;
   type?: "market" | "limit";
   amount?: number;
   price?: number;
+  stopLoss?: number;
+  takeProfit?: number;
   tif?: FuturesTimeInForce;
   reduceOnly?: boolean;
 }
@@ -137,6 +152,20 @@ interface FuturesQuoteOptions {
   scope?: FuturesScope;
   symbol: string;
   depth?: number;
+}
+
+interface FuturesProtectOptions {
+  scope?: FuturesScope;
+  symbol: string;
+  side: "buy" | "sell";
+  amount: number;
+  stopLoss?: number;
+  takeProfit?: number;
+}
+
+interface DashboardServerHandle {
+  server: HealthServer;
+  port: number;
 }
 
 const SPINNER_FRAMES = ["|", "/", "-", "\\"];
@@ -221,6 +250,7 @@ const withLoading = async <T>(
     restoreStderr();
     throw error;
   }
+
 };
 const parseMode = (value: string | undefined): PipelineMode | undefined => {
   if (!value) return undefined;
@@ -278,6 +308,7 @@ const getSpotService = (runtime: RuntimeConfig, mode: PipelineMode): BinanceSpot
   const telemetrySink = runtime.obsPersistEnabled
     ? new SqliteTelemetrySink(runtime.obsSqlitePath)
     : new InMemoryTelemetrySink(false);
+  const protectionDbPath = runtime.obsPersistEnabled ? runtime.obsSqlitePath : undefined;
   return BinanceSpotTradingService.getInstance({
     enabled: runtime.binanceSpotEnabled,
     apiKey: runtime.binanceApiKey,
@@ -286,6 +317,7 @@ const getSpotService = (runtime: RuntimeConfig, mode: PipelineMode): BinanceSpot
     defaultTif: runtime.binanceSpotDefaultTif,
     recvWindow: runtime.binanceSpotRecvWindow,
     timeoutMs: runtime.nodeTimeoutMs,
+    protectionDbPath,
     mode,
     telemetrySink
   });
@@ -303,6 +335,7 @@ const getFuturesService = (runtime: RuntimeConfig, mode: PipelineMode): BinanceF
   const telemetrySink = runtime.obsPersistEnabled
     ? new SqliteTelemetrySink(runtime.obsSqlitePath)
     : new InMemoryTelemetrySink(false);
+  const protectionDbPath = runtime.obsPersistEnabled ? runtime.obsSqlitePath : undefined;
   return BinanceFuturesTradingService.getInstance({
     enabled: runtime.binanceFuturesEnabled,
     apiKey: runtime.binanceApiKey,
@@ -315,6 +348,7 @@ const getFuturesService = (runtime: RuntimeConfig, mode: PipelineMode): BinanceF
     defaultLeverage: runtime.binanceFuturesDefaultLeverage,
     marginMode: runtime.binanceFuturesMarginMode,
     positionMode: runtime.binanceFuturesPositionMode,
+    protectionDbPath,
     mode,
     telemetrySink
   });
@@ -434,6 +468,52 @@ const doHealthCheck = async (options: HealthOptions, fallbackPort: number): Prom
   } catch (error) {
     return { exitCode: 1, message: `health check error: ${String(error)}` };
   }
+};
+
+const createDashboardServer = (runtime: RuntimeConfig, portOverride?: number): DashboardServerHandle => {
+  if (!runtime.obsPersistEnabled) {
+    throw new Error("Dashboard requires OBS_PERSIST_ENABLED=true so metrics can be read from SQLite telemetry.");
+  }
+  const telemetry = new InMemoryTelemetrySink(false);
+  const monitor = new HealthMonitor(telemetry, {
+    maxP95RunLatencyMs: runtime.sloP95RunLatencyMs,
+    maxFallbackRatio: runtime.sloMaxFallbackRatio,
+    maxConsecutiveFailures: runtime.sloMaxConsecutiveFailures,
+  });
+  const sqliteSink = new SqliteTelemetrySink(runtime.obsSqlitePath);
+  let runnerState: RunnerState | null = null;
+  const port = portOverride ?? runtime.healthServerPort;
+  const server = new HealthServer({
+    config: { enabled: true, port },
+    monitor,
+    getRunnerState: () => runnerState,
+    getLastRun: () => monitor.getLastRunSample(),
+    getMetricsView: (limit = 500) => ({
+      metrics: sqliteSink.getMetrics({ limit }),
+      summary: sqliteSink.getMetricSummary(Math.max(1, limit)),
+      alerts: sqliteSink.getAlerts({ limit: Math.max(50, Math.min(limit, 1000)) }),
+    }),
+  });
+  return { server, port };
+};
+
+const doHealthServe = async (runtime: RuntimeConfig, portOverride?: number): Promise<void> => {
+  const { server, port } = createDashboardServer(runtime, portOverride);
+  await server.start();
+  console.log(`Dashboard server running on http://127.0.0.1:${port}/metricsz`);
+  console.log("Press Ctrl+C to stop.");
+
+  await new Promise<void>((resolve) => {
+    let stopped = false;
+    const shutdown = async () => {
+      if (stopped) return;
+      stopped = true;
+      await server.stop();
+      resolve();
+    };
+    process.once("SIGINT", () => void shutdown());
+    process.once("SIGTERM", () => void shutdown());
+  });
 };
 
 const doDoctor = (runtime: RuntimeConfig, mode: PipelineMode): CliCommandResult => {
@@ -598,6 +678,8 @@ const buildSpotOrderRequest = (
   amount: options.amount,
   price: options.price,
   quoteCost: options.quoteCost,
+  stopLoss: options.stopLoss,
+  takeProfit: options.takeProfit,
   tif: options.tif ?? defaultTif
 });
 
@@ -723,6 +805,25 @@ const doSpotQuote = async (
   return { exitCode: 0, message: "spot quote fetched", data: asJsonValue(quote) };
 };
 
+const doSpotProtect = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: SpotProtectOptions
+): Promise<CliCommandResult> => {
+  const service = getSpotService(runtime, mode);
+  const summary = await service.armProtectionManual(
+    {
+      symbol: options.symbol.trim().toUpperCase(),
+      side: "buy",
+      amount: Number(options.amount),
+      stopLoss: options.stopLoss,
+      takeProfit: options.takeProfit,
+    },
+    makeSpotContext(mode)
+  );
+  return { exitCode: 0, message: "spot protection armed", data: asJsonValue(summary) };
+};
+
 const parseFuturesType = (value?: string): "market" | "limit" =>
   value?.toLowerCase() === "limit" ? "limit" : "market";
 
@@ -741,6 +842,8 @@ const doFuturesBuy = async (
       type: parseFuturesType(options.type),
       amount: Number(options.amount ?? 0),
       price: options.price,
+      stopLoss: options.stopLoss,
+      takeProfit: options.takeProfit,
       tif: options.tif ?? runtime.binanceFuturesDefaultTif,
       reduceOnly: options.reduceOnly
     },
@@ -764,6 +867,8 @@ const doFuturesSell = async (
       type: parseFuturesType(options.type),
       amount: Number(options.amount ?? 0),
       price: options.price,
+      stopLoss: options.stopLoss,
+      takeProfit: options.takeProfit,
       tif: options.tif ?? runtime.binanceFuturesDefaultTif,
       reduceOnly: options.reduceOnly
     },
@@ -910,6 +1015,34 @@ const doFuturesQuote = async (
   return { exitCode: 0, message: "futures quote fetched", data: asJsonValue(row) };
 };
 
+const doFuturesProtect = async (
+  runtime: RuntimeConfig,
+  mode: PipelineMode,
+  options: FuturesProtectOptions
+): Promise<CliCommandResult> => {
+  const service = getFuturesService(runtime, mode);
+  const scope = normalizeFuturesScope(runtime, options.scope);
+  if (!(options.side === "buy" || options.side === "sell")) {
+    return {
+      exitCode: 1,
+      message: `invalid futures side '${String(options.side)}'; expected 'buy' or 'sell'`,
+    };
+  }
+  const side: "buy" | "sell" = options.side;
+  const summary = await service.armProtectionManual(
+    {
+      scope,
+      symbol: normalizeFuturesSymbol(options.symbol),
+      side,
+      amount: Number(options.amount),
+      stopLoss: options.stopLoss,
+      takeProfit: options.takeProfit,
+    },
+    makeFuturesContext(mode)
+  );
+  return { exitCode: 0, message: "futures protection armed", data: asJsonValue(summary) };
+};
+
 const printResult = (result: CliCommandResult, asJson: boolean): void => {
   if (asJson) {
     console.log(JSON.stringify(result, null, 2));
@@ -919,6 +1052,7 @@ const printResult = (result: CliCommandResult, asJson: boolean): void => {
       console.log(JSON.stringify(result.data, null, 2));
     }
   }
+
 };
 
 const toRunOverrides = (
@@ -994,17 +1128,18 @@ const runSpotInteractive = async (
     const choice = await select({
       message: "Spot Desk",
       choices: [
-        { name: "Buy", value: "buy" },
-        { name: "Sell", value: "sell" },
-        { name: "Order Get", value: "order-get" },
-        { name: "Order Cancel", value: "order-cancel" },
-        { name: "Order Cancel All", value: "order-cancel-all" },
-        { name: "Orders Open", value: "orders-open" },
-        { name: "Orders Closed", value: "orders-closed" },
-        { name: "Balance", value: "balance" },
-        { name: "Trades", value: "trades" },
-        { name: "Quote", value: "quote" },
-        { name: "Back", value: "back" }
+        { name: "\u{1F7E2} Buy", value: "buy" },
+        { name: "\u{1F534} Sell", value: "sell" },
+        { name: "\u{1F50E} Order Get", value: "order-get" },
+        { name: "\u{274C} Order Cancel", value: "order-cancel" },
+        { name: "\u{1F9F9} Order Cancel All", value: "order-cancel-all" },
+        { name: "\u{1F4C2} Orders Open", value: "orders-open" },
+        { name: "\u{1F4C1} Orders Closed", value: "orders-closed" },
+        { name: "\u{1F4B0} Balance", value: "balance" },
+        { name: "\u{1F4DC} Trades", value: "trades" },
+        { name: "\u{1F4C8} Quote", value: "quote" },
+        { name: "\u{1F6E1}\u{FE0F} Protect Position", value: "protect" },
+        { name: "\u{2B05}\u{FE0F} Back", value: "back" }
       ]
     });
 
@@ -1032,7 +1167,9 @@ const runSpotInteractive = async (
           quoteCost = await promptFloat("Quote cost (optional, USDT)", 50);
         }
 
-        const options: SpotPlaceOptions = { symbol, type, amount, price, quoteCost };
+        const stopLoss = await promptFloat("Stop-loss price (optional)");
+        const takeProfit = await promptFloat("Take-profit price (optional)");
+        const options: SpotPlaceOptions = { symbol, type, amount, price, quoteCost, stopLoss, takeProfit };
         const result = await withLoading(
           choice === "buy" ? "Placing spot buy" : "Placing spot sell",
           async () => choice === "buy" ? doSpotBuy(runtime, mode, options) : doSpotSell(runtime, mode, options)
@@ -1109,6 +1246,23 @@ const runSpotInteractive = async (
           doSpotQuote(runtime, mode, { symbol, depth })
         );
         printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "protect") {
+        const symbol = await promptSymbol("BTC/USDT");
+        const amount = await promptFloat("Amount to protect (contracts or base coin)", 0.001);
+        const stopLoss = await promptFloat("Stop-loss price (optional)");
+        const takeProfit = await promptFloat("Take-profit price (optional)");
+        const result = await withLoading("Arming spot protection", async () =>
+          doSpotProtect(runtime, mode, {
+            symbol,
+            amount: Number(amount ?? 0),
+            stopLoss,
+            takeProfit,
+          })
+        );
+        printResult(result, Boolean(global.json));
       }
     } catch (error) {
       printResult({ exitCode: 1, message: `spot interactive failed: ${String(error)}` }, Boolean(global.json));
@@ -1120,11 +1274,21 @@ const promptFuturesScope = async (fallback: FuturesScope): Promise<FuturesScope>
   (await select({
     message: "Futures scope",
     choices: [
-      { name: "USD-M", value: "usdm" },
-      { name: "COIN-M", value: "coinm" }
+      { name: "\u{1F4B5} USD-M", value: "usdm" },
+      { name: "\u{1FA99} COIN-M", value: "coinm" }
     ],
     default: fallback
   })) as FuturesScope;
+
+const futuresAmountPrompt = (scope: FuturesScope): string =>
+  scope === "usdm"
+    ? "Order size (quantity; base/contract units, not margin USDT)"
+    : "Order size (contracts only)";
+
+const futuresProtectAmountPrompt = (scope: FuturesScope): string =>
+  scope === "usdm"
+    ? "Amount to protect (quantity in base/contract units)"
+    : "Amount to protect (contracts only)";
 
 const runFuturesInteractive = async (
   global: CliGlobalOptions,
@@ -1136,18 +1300,19 @@ const runFuturesInteractive = async (
     const choice = await select({
       message: "Futures Desk",
       choices: [
-        { name: "Buy", value: "buy" },
-        { name: "Sell", value: "sell" },
-        { name: "Order Get", value: "order-get" },
-        { name: "Order Cancel", value: "order-cancel" },
-        { name: "Order Cancel All", value: "order-cancel-all" },
-        { name: "Orders Open", value: "orders-open" },
-        { name: "Orders Closed", value: "orders-closed" },
-        { name: "Balance", value: "balance" },
-        { name: "Positions", value: "positions" },
-        { name: "Trades", value: "trades" },
-        { name: "Quote", value: "quote" },
-        { name: "Back", value: "back" }
+        { name: "\u{1F7E2} Buy", value: "buy" },
+        { name: "\u{1F534} Sell", value: "sell" },
+        { name: "\u{1F50E} Order Get", value: "order-get" },
+        { name: "\u{274C} Order Cancel", value: "order-cancel" },
+        { name: "\u{1F9F9} Order Cancel All", value: "order-cancel-all" },
+        { name: "\u{1F4C2} Orders Open", value: "orders-open" },
+        { name: "\u{1F4C1} Orders Closed", value: "orders-closed" },
+        { name: "\u{1F4B0} Balance", value: "balance" },
+        { name: "\u{1F4CC} Positions", value: "positions" },
+        { name: "\u{1F4DC} Trades", value: "trades" },
+        { name: "\u{1F4C8} Quote", value: "quote" },
+        { name: "\u{1F6E1}\u{FE0F} Protect Position", value: "protect" },
+        { name: "\u{2B05}\u{FE0F} Back", value: "back" }
       ]
     });
 
@@ -1168,10 +1333,12 @@ const runFuturesInteractive = async (
             { name: "Limit", value: "limit" }
           ]
         })) as "market" | "limit";
-        const amount = await promptFloat("Amount (contracts/base)", 0.001);
+        const amount = await promptFloat(futuresAmountPrompt(scope), scope === "coinm" ? 1 : 0.001);
         const price = type === "limit" ? await promptFloat("Limit price", 100000) : undefined;
+        const stopLoss = await promptFloat("Stop-loss price (optional)");
+        const takeProfit = await promptFloat("Take-profit price (optional)");
         const reduceOnly = await confirm({ message: "Reduce-only?", default: false });
-        const options: FuturesPlaceOptions = { scope, symbol, type, amount, price, reduceOnly };
+        const options: FuturesPlaceOptions = { scope, symbol, type, amount, price, stopLoss, takeProfit, reduceOnly };
         const result = await withLoading(
           choice === "buy" ? "Placing futures buy" : "Placing futures sell",
           async () => choice === "buy" ? doFuturesBuy(runtime, mode, options) : doFuturesSell(runtime, mode, options)
@@ -1260,6 +1427,32 @@ const runFuturesInteractive = async (
           doFuturesQuote(runtime, mode, { scope, symbol, depth })
         );
         printResult(result, Boolean(global.json));
+        continue;
+      }
+
+      if (choice === "protect") {
+        const symbol = await promptFuturesSymbol("BTC/USDT:USDT");
+        const side = (await select({
+          message: "Parent side (existing position direction)",
+          choices: [
+            { name: "\u{1F7E2} Buy/Long", value: "buy" },
+            { name: "\u{1F534} Sell/Short", value: "sell" }
+          ]
+        })) as "buy" | "sell";
+        const amount = await promptFloat(futuresProtectAmountPrompt(scope), scope === "coinm" ? 1 : 0.001);
+        const stopLoss = await promptFloat("Stop-loss price (optional)");
+        const takeProfit = await promptFloat("Take-profit price (optional)");
+        const result = await withLoading("Arming futures protection", async () =>
+          doFuturesProtect(runtime, mode, {
+            scope,
+            symbol,
+            side,
+            amount: Number(amount ?? 0),
+            stopLoss,
+            takeProfit,
+          })
+        );
+        printResult(result, Boolean(global.json));
       }
     } catch (error) {
       printResult({ exitCode: 1, message: `futures interactive failed: ${String(error)}` }, Boolean(global.json));
@@ -1272,16 +1465,17 @@ const runInteractive = async (command: Command): Promise<void> => {
   console.log("Vexis Interactive Console");
 
   let exitRequested = false;
+  let dashboardHandle: DashboardServerHandle | null = null;
   while (!exitRequested) {
     const choice = await select({
       message: "Main menu",
       choices: [
-        { name: "Trading Cycle", value: "trading" },
-        { name: "Spot Desk", value: "spot" },
-        { name: "Futures Desk", value: "futures" },
-        { name: "Ops & Health", value: "ops" },
-        { name: "Admin", value: "admin" },
-        { name: "Exit", value: "exit" }
+        { name: "\u{1F501} Trading Cycle", value: "trading" },
+        { name: "\u{1F4B9} Spot Desk", value: "spot" },
+        { name: "\u{1F4CA} Futures Desk", value: "futures" },
+        { name: "\u{1FA7A} Ops & Health", value: "ops" },
+        { name: "\u{2699}\u{FE0F} Admin", value: "admin" },
+        { name: "\u{1F6AA} Exit", value: "exit" }
       ]
     });
 
@@ -1294,9 +1488,9 @@ const runInteractive = async (command: Command): Promise<void> => {
       const action = await select({
         message: "Trading actions",
         choices: [
-          { name: "Run one cycle", value: "run" },
-          { name: "Start runner", value: "runner" },
-          { name: "Back", value: "back" }
+          { name: "\u{25B6}\u{FE0F} Run one cycle", value: "run" },
+          { name: "\u{23F1}\u{FE0F} Start runner", value: "runner" },
+          { name: "\u{2B05}\u{FE0F} Back", value: "back" }
         ]
       });
       if (action === "back") continue;
@@ -1352,63 +1546,102 @@ const runInteractive = async (command: Command): Promise<void> => {
     }
 
     if (choice === "ops") {
-      const opsAction = await select({
-        message: "Ops & Health",
-        choices: [
-          { name: "Ops tail", value: "ops-tail" },
-          { name: "Health check", value: "health" },
-          { name: "Account check", value: "account-check" },
-          { name: "Back", value: "back" }
-        ]
-      });
-      if (opsAction === "back") continue;
-
-      if (opsAction === "ops-tail") {
-        const runId = await input({ message: "Run ID (optional)", default: "" });
-        const severity = await select({
-          message: "Severity filter",
+      let opsBack = false;
+      while (!opsBack) {
+        const opsAction = await select({
+          message: "Ops & Health",
           choices: [
-            { name: "None", value: "" },
-            { name: "info", value: "info" },
-            { name: "warning", value: "warning" },
-            { name: "critical", value: "critical" }
+            { name: "\u{1F9FE} Ops tail", value: "ops-tail" },
+            { name: "\u{1FA7A} Health check", value: "health" },
+            dashboardHandle
+              ? { name: `\u{1F6D1} Stop dashboard server (port ${dashboardHandle.port})`, value: "health-serve-stop" }
+              : { name: "\u{1F4CA} Start dashboard server", value: "health-serve-start" },
+            { name: "\u{1F45B} Account check", value: "account-check" },
+            { name: "\u{2B05}\u{FE0F} Back", value: "back" }
           ]
         });
-        const asJson = await confirm({ message: "Output JSON?", default: false });
-        await withLoading("Fetching ops tail", async () =>
-          runOpsTail(
-            tailOptionsToArgv({
-              runId: runId || undefined,
-              severity: (severity || undefined) as TailOptions["severity"],
-              json: asJson,
-            }),
-          ),
-        );
-        continue;
-      }
+        if (opsAction === "back") {
+          opsBack = true;
+          continue;
+        }
 
-      if (opsAction === "health") {
-        const check = (await select({
-          message: "Endpoint",
-          choices: [
-            { name: "readyz", value: "readyz" },
-            { name: "healthz", value: "healthz" }
-          ]
-        })) as "healthz" | "readyz";
-        const { runtime } = resolveRuntimeConfig(global, {});
-        const port = await promptInt("Port", runtime.healthServerPort);
-        const result = await withLoading("Checking health", async () => doHealthCheck({ check, port }, runtime.healthServerPort));
-        printResult(result, Boolean(global.json));
-        continue;
-      }
+        if (opsAction === "ops-tail") {
+          const runId = await input({ message: "Run ID (optional)", default: "" });
+          const severity = await select({
+            message: "Severity filter",
+            choices: [
+              { name: "None", value: "" },
+              { name: "info", value: "info" },
+              { name: "warning", value: "warning" },
+              { name: "critical", value: "critical" }
+            ]
+          });
+          const asJson = await confirm({ message: "Output JSON?", default: false });
+          await withLoading("Fetching ops tail", async () =>
+            runOpsTail(
+              tailOptionsToArgv({
+                runId: runId || undefined,
+                severity: (severity || undefined) as TailOptions["severity"],
+                json: asJson,
+              }),
+            ),
+          );
+          continue;
+        }
 
-      try {
-        const { runtime, view } = resolveRuntimeConfig(global, {});
-        const mode = (view.effective.mode as PipelineMode) ?? "backtest";
-        const result = await withLoading("Checking account", async () => doAccountCheck(runtime, mode));
-        printResult(result, Boolean(global.json));
-      } catch (error) {
-        printResult({ exitCode: 1, message: `account check failed: ${String(error)}` }, Boolean(global.json));
+        if (opsAction === "health") {
+          const check = (await select({
+            message: "Endpoint",
+            choices: [
+              { name: "readyz", value: "readyz" },
+              { name: "healthz", value: "healthz" }
+            ]
+          })) as "healthz" | "readyz";
+          const { runtime } = resolveRuntimeConfig(global, {});
+          const port = await promptInt("Port", runtime.healthServerPort);
+          const result = await withLoading("Checking health", async () => doHealthCheck({ check, port }, runtime.healthServerPort));
+          printResult(result, Boolean(global.json));
+          continue;
+        }
+
+        if (opsAction === "health-serve-start") {
+          try {
+            const { runtime } = resolveRuntimeConfig(global, {});
+            const port = await promptInt("Dashboard port", runtime.healthServerPort);
+            const handle = createDashboardServer(runtime, port);
+            await withLoading("Starting dashboard server", async () => handle.server.start());
+            dashboardHandle = handle;
+            console.log(`Dashboard server running on http://127.0.0.1:${handle.port}/metricsz`);
+          } catch (error) {
+            printResult({ exitCode: 1, message: `start dashboard failed: ${String(error)}` }, Boolean(global.json));
+          }
+          continue;
+        }
+
+        if (opsAction === "health-serve-stop") {
+          if (!dashboardHandle) {
+            printResult({ exitCode: 1, message: "dashboard server is not running" }, Boolean(global.json));
+            continue;
+          }
+          const active = dashboardHandle;
+          try {
+            await withLoading("Stopping dashboard server", async () => active.server.stop());
+            dashboardHandle = null;
+            console.log(`Dashboard server stopped on port ${active.port}.`);
+          } catch (error) {
+            printResult({ exitCode: 1, message: `stop dashboard failed: ${String(error)}` }, Boolean(global.json));
+          }
+          continue;
+        }
+
+        try {
+          const { runtime, view } = resolveRuntimeConfig(global, {});
+          const mode = (view.effective.mode as PipelineMode) ?? "backtest";
+          const result = await withLoading("Checking account", async () => doAccountCheck(runtime, mode));
+          printResult(result, Boolean(global.json));
+        } catch (error) {
+          printResult({ exitCode: 1, message: `account check failed: ${String(error)}` }, Boolean(global.json));
+        }
       }
       continue;
     }
@@ -1417,10 +1650,10 @@ const runInteractive = async (command: Command): Promise<void> => {
       const adminAction = await select({
         message: "Admin",
         choices: [
-          { name: "Doctor", value: "doctor" },
-          { name: "Env check", value: "env-check" },
-          { name: "Validate", value: "validate" },
-          { name: "Back", value: "back" }
+          { name: "\u{1F9EA} Doctor", value: "doctor" },
+          { name: "\u{1F9ED} Env check", value: "env-check" },
+          { name: "\u{2705} Validate", value: "validate" },
+          { name: "\u{2B05}\u{FE0F} Back", value: "back" }
         ]
       });
       if (adminAction === "back") continue;
@@ -1457,6 +1690,14 @@ const runInteractive = async (command: Command): Promise<void> => {
       } catch (error) {
         printResult({ exitCode: 1, message: `doctor failed: ${String(error)}` }, Boolean(global.json));
       }
+    }
+  }
+
+  if (dashboardHandle) {
+    try {
+      await dashboardHandle.server.stop();
+    } catch {
+      // best effort shutdown on interactive exit
     }
   }
 };
@@ -1514,12 +1755,17 @@ program
 
 program
   .command("health")
-  .description("Check health server")
+  .description("Check health server or run standalone dashboard server")
   .option("--check <endpoint>", "healthz|readyz", "readyz")
   .option("--port <port>", "Health port", (v) => Number.parseInt(v, 10))
+  .option("--serve", "Run standalone dashboard server for /metricsz")
   .action(async (options: HealthOptions, command: Command) => {
     const global = normalizeGlobalOptions(command);
     const { runtime } = resolveRuntimeConfig(global, {});
+    if (options.serve) {
+      await doHealthServe(runtime, options.port);
+      return;
+    }
     const result = await withLoading("Checking health", async () =>
       doHealthCheck(options, runtime.healthServerPort),
     );
@@ -1646,6 +1892,8 @@ spotCommand
   .option("--amount <amount>", "Base amount", (v) => Number.parseFloat(v))
   .option("--price <price>", "Limit price", (v) => Number.parseFloat(v))
   .option("--quote-cost <cost>", "Quote notional for market buy", (v) => Number.parseFloat(v))
+  .option("--stop-loss <price>", "Stop-loss trigger price", (v) => Number.parseFloat(v))
+  .option("--take-profit <price>", "Take-profit trigger price", (v) => Number.parseFloat(v))
   .option("--tif <tif>", "GTC|IOC|FOK")
   .action(async (options: SpotPlaceOptions, command: Command) => {
     const global = normalizeGlobalOptions(command);
@@ -1668,6 +1916,8 @@ spotCommand
   .option("--type <type>", "market|limit", "market")
   .option("--amount <amount>", "Base amount", (v) => Number.parseFloat(v))
   .option("--price <price>", "Limit price", (v) => Number.parseFloat(v))
+  .option("--stop-loss <price>", "Stop-loss trigger price", (v) => Number.parseFloat(v))
+  .option("--take-profit <price>", "Take-profit trigger price", (v) => Number.parseFloat(v))
   .option("--tif <tif>", "GTC|IOC|FOK")
   .action(async (options: SpotPlaceOptions, command: Command) => {
     const global = normalizeGlobalOptions(command);
@@ -1818,6 +2068,27 @@ spotCommand
   });
 
 spotCommand
+  .command("protect")
+  .description("Arm SL/TP for an already-open spot position")
+  .requiredOption("--symbol <symbol>", "Spot symbol, e.g. BTC/USDT")
+  .requiredOption("--amount <amount>", "Amount to protect", (v) => Number.parseFloat(v))
+  .option("--stop-loss <price>", "Stop-loss trigger price", (v) => Number.parseFloat(v))
+  .option("--take-profit <price>", "Take-profit trigger price", (v) => Number.parseFloat(v))
+  .action(async (options: SpotProtectOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Arming spot protection", async () => doSpotProtect(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `spot protect failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+spotCommand
   .command("quote")
   .description("Fetch spot quote + orderbook top")
   .requiredOption("--symbol <symbol>", "Spot symbol")
@@ -1845,6 +2116,8 @@ futuresCommand
   .option("--type <type>", "market|limit", "market")
   .option("--amount <amount>", "Order amount", (v) => Number.parseFloat(v))
   .option("--price <price>", "Limit price", (v) => Number.parseFloat(v))
+  .option("--stop-loss <price>", "Stop-loss trigger price", (v) => Number.parseFloat(v))
+  .option("--take-profit <price>", "Take-profit trigger price", (v) => Number.parseFloat(v))
   .option("--tif <tif>", "GTC|IOC|FOK")
   .option("--reduce-only", "Reduce-only order")
   .action(async (options: FuturesPlaceOptions, command: Command) => {
@@ -1869,6 +2142,8 @@ futuresCommand
   .option("--type <type>", "market|limit", "market")
   .option("--amount <amount>", "Order amount", (v) => Number.parseFloat(v))
   .option("--price <price>", "Limit price", (v) => Number.parseFloat(v))
+  .option("--stop-loss <price>", "Stop-loss trigger price", (v) => Number.parseFloat(v))
+  .option("--take-profit <price>", "Take-profit trigger price", (v) => Number.parseFloat(v))
   .option("--tif <tif>", "GTC|IOC|FOK")
   .option("--reduce-only", "Reduce-only order")
   .action(async (options: FuturesPlaceOptions, command: Command) => {
@@ -2043,6 +2318,29 @@ futuresCommand
       process.exitCode = result.exitCode;
     } catch (error) {
       printResult({ exitCode: 1, message: `futures trades failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
+      process.exitCode = 1;
+    }
+  });
+
+futuresCommand
+  .command("protect")
+  .description("Arm SL/TP for an already-open futures position")
+  .requiredOption("--symbol <symbol>", "Futures symbol, e.g. BTC/USDT:USDT")
+  .requiredOption("--side <side>", "buy|sell parent side")
+  .requiredOption("--amount <amount>", "Amount/contracts to protect", (v) => Number.parseFloat(v))
+  .option("--scope <scope>", "usdm|coinm")
+  .option("--stop-loss <price>", "Stop-loss trigger price", (v) => Number.parseFloat(v))
+  .option("--take-profit <price>", "Take-profit trigger price", (v) => Number.parseFloat(v))
+  .action(async (options: FuturesProtectOptions, command: Command) => {
+    const global = normalizeGlobalOptions(command);
+    try {
+      const { runtime, view } = resolveRuntimeConfig(global, {});
+      const mode = (view.effective.mode as PipelineMode) ?? "paper";
+      const result = await withLoading("Arming futures protection", async () => doFuturesProtect(runtime, mode, options));
+      printResult(result, Boolean(global.json || global.output === "json"));
+      process.exitCode = result.exitCode;
+    } catch (error) {
+      printResult({ exitCode: 1, message: `futures protect failed: ${String(error)}` }, Boolean(global.json || global.output === "json"));
       process.exitCode = 1;
     }
   });

@@ -57,6 +57,7 @@ const initSchema = (db: Database.Database): void => {
     );
 
     CREATE INDEX IF NOT EXISTS idx_telemetry_metrics_name ON telemetry_metrics(name);
+    CREATE INDEX IF NOT EXISTS idx_telemetry_metrics_name_latest ON telemetry_metrics(name, timestamp DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_telemetry_metrics_run ON telemetry_metrics(run_id);
     CREATE INDEX IF NOT EXISTS idx_telemetry_metrics_trace ON telemetry_metrics(trace_id);
     CREATE INDEX IF NOT EXISTS idx_telemetry_metrics_time ON telemetry_metrics(timestamp);
@@ -82,7 +83,40 @@ const initSchema = (db: Database.Database): void => {
     CREATE INDEX IF NOT EXISTS idx_telemetry_alerts_trace ON telemetry_alerts(trace_id);
     CREATE INDEX IF NOT EXISTS idx_telemetry_alerts_severity ON telemetry_alerts(severity);
     CREATE INDEX IF NOT EXISTS idx_telemetry_alerts_run_trace_time ON telemetry_alerts(run_id, trace_id, timestamp);
+
+    CREATE TABLE IF NOT EXISTS protection_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      parent_order_id TEXT NOT NULL,
+      parent_side TEXT NOT NULL,
+      parent_type TEXT NOT NULL,
+      sl_price REAL,
+      tp_price REAL,
+      sl_order_id TEXT,
+      tp_order_id TEXT,
+      mode TEXT,
+      status TEXT NOT NULL,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      last_error_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(scope, symbol, parent_order_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_protection_groups_status ON protection_groups(status);
+    CREATE INDEX IF NOT EXISTS idx_protection_groups_scope_symbol ON protection_groups(scope, symbol);
   `);
+
+  const columns = db.prepare("PRAGMA table_info(protection_groups)").all() as Array<{ name?: unknown }>;
+  const names = new Set(columns.map((row) => String(row.name ?? "")));
+  if (!names.has("retry_count")) {
+    db.exec("ALTER TABLE protection_groups ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;");
+  }
+  if (!names.has("last_error_at")) {
+    db.exec("ALTER TABLE protection_groups ADD COLUMN last_error_at TEXT;");
+  }
 };
 
 export const openObservabilityDb = (dbPath: string): Database.Database => {

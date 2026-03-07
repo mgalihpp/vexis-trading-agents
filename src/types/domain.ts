@@ -530,6 +530,15 @@ export interface EffectiveConfigView {
 export type SpotOrderType = "market" | "limit";
 export type SpotOrderSide = "buy" | "sell";
 export type SpotTimeInForce = "GTC" | "IOC" | "FOK";
+export type ProtectionMode = "native" | "fallback";
+
+export interface ProtectionSummary {
+  enabled: boolean;
+  mode: ProtectionMode;
+  parentOrderId?: string;
+  slOrderId?: string;
+  tpOrderId?: string;
+}
 
 export interface SpotOrderRequest {
   symbol: string;
@@ -538,6 +547,8 @@ export interface SpotOrderRequest {
   amount?: number;
   quoteCost?: number;
   price?: number;
+  stopLoss?: number;
+  takeProfit?: number;
   tif?: SpotTimeInForce;
   clientOrderId?: string;
 }
@@ -558,6 +569,7 @@ export interface SpotOrderResult {
   remaining: number | null;
   cost: number | null;
   timestamp: string;
+  protection?: ProtectionSummary;
 }
 
 export interface SpotBalanceAsset {
@@ -629,6 +641,8 @@ export interface FuturesOrderRequest {
   type: FuturesOrderType;
   amount: number;
   price?: number;
+  stopLoss?: number;
+  takeProfit?: number;
   tif?: FuturesTimeInForce;
   reduceOnly?: boolean;
   clientOrderId?: string;
@@ -652,6 +666,7 @@ export interface FuturesOrderResult {
   cost: number | null;
   reduceOnly: boolean;
   timestamp: string;
+  protection?: ProtectionSummary;
 }
 
 export interface FuturesBalanceAsset {

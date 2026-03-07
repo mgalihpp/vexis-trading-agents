@@ -2,6 +2,7 @@ import ccxt, { type Exchange } from "ccxt";
 import type {
   MetricTags,
   PipelineMode,
+  ProtectionSummary,
   SpotBalanceAsset,
   SpotBalanceSnapshot,
   SpotOrderRequest,
@@ -13,6 +14,7 @@ import type {
 } from "../types";
 import { ProviderError, SpotGuardError } from "../types";
 import { withTimeout } from "./ops";
+import { ProtectionGroupStore, type ProtectionModeRecord } from "./protection-store";
 
 type CcxtTicker = { bid?: number; ask?: number; last?: number };
 type CcxtOrderBook = { bids?: Array<[number, number]>; asks?: Array<[number, number]> };
@@ -117,6 +119,61 @@ const asPositive = (value: unknown): number | undefined => {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 };
 
+const extractErrorCodeAndMessage = (error: unknown): { code: string; message: string } => {
+  const raw = error as { code?: unknown; message?: unknown };
+  const code = String(raw?.code ?? "").toLowerCase();
+  const message = String(raw?.message ?? error ?? "").toLowerCase();
+  return { code, message };
+};
+
+const isNativeProtectionUnsupportedError = (error: unknown): boolean => {
+  const { code, message } = extractErrorCodeAndMessage(error);
+  const haystack = `${code} ${message}`;
+  const mentionsProtectionParams = [
+    "stoplossprice",
+    "takeprofitprice",
+    "stop-loss",
+    "take-profit",
+    "stop loss",
+    "take profit",
+  ].some((token) => haystack.includes(token));
+  const explicitUnsupported = [
+    "unsupported",
+    "not supported",
+    "unknown parameter",
+    "unrecognized parameter",
+  ].some((token) => haystack.includes(token));
+  return mentionsProtectionParams && explicitUnsupported;
+};
+
+const collectNumericParamValues = (value: unknown, key: string, out: number[] = []): number[] => {
+  if (Array.isArray(value)) {
+    for (const item of value) collectNumericParamValues(item, key, out);
+    return out;
+  }
+  if (!value || typeof value !== "object") return out;
+  for (const [k, v] of Object.entries(value)) {
+    if (k.toLowerCase() === key) {
+      const n = Number(v);
+      if (Number.isFinite(n)) out.push(n);
+    }
+    if (v && typeof v === "object") collectNumericParamValues(v, key, out);
+  }
+  return out;
+};
+
+const isNativeProtectionApplied = (
+  row: CcxtOrder,
+  request: Pick<SpotOrderRequest, "stopLoss" | "takeProfit">
+): boolean => {
+  if (!(request.stopLoss || request.takeProfit)) return false;
+  const info = (row as { info?: unknown }).info;
+  if (!info || typeof info !== "object") return false;
+  const slApplied = request.stopLoss ? collectNumericParamValues(info, "stoplossprice").length > 0 : true;
+  const tpApplied = request.takeProfit ? collectNumericParamValues(info, "takeprofitprice").length > 0 : true;
+  return slApplied && tpApplied;
+};
+
 const toIso = (orderOrTrade: { datetime?: string; timestamp?: number }): string => {
   if (orderOrTrade.datetime) return String(orderOrTrade.datetime);
   if (typeof orderOrTrade.timestamp === "number" && Number.isFinite(orderOrTrade.timestamp)) {
@@ -139,6 +196,7 @@ export interface BinanceSpotTradingServiceConfig {
   defaultTif: SpotTimeInForce;
   recvWindow: number;
   timeoutMs: number;
+  protectionDbPath?: string;
   telemetrySink?: TelemetrySink;
   mode?: PipelineMode;
   client?: SpotClientLike;
@@ -160,6 +218,10 @@ export class BinanceSpotTradingService {
   private readonly timeoutMs: number;
   private readonly recvWindow: number;
   private readonly defaultTif: SpotTimeInForce;
+  private readonly protectionStore?: ProtectionGroupStore;
+  private readonly protectionMonitorRetryBudget = 5;
+  private monitorTimer: NodeJS.Timeout | null = null;
+  private isProtectionMonitorRunning = false;
   private marketsLoaded = false;
   private markets = new Map<string, SpotMarket>();
   private lastRunId = "spot-run";
@@ -174,6 +236,10 @@ export class BinanceSpotTradingService {
     this.mode = config.mode ?? "paper";
     this.symbolWhitelist = new Set(config.symbolWhitelist.map((s) => s.trim().toUpperCase()).filter(Boolean));
     this.client = config.client ?? this.createClient();
+    if (config.protectionDbPath) {
+      this.protectionStore = new ProtectionGroupStore(config.protectionDbPath);
+      this.startProtectionMonitor();
+    }
   }
 
   public setRunContext(ctx: SpotActionContext): void {
@@ -202,20 +268,67 @@ export class BinanceSpotTradingService {
       if (normalized.side === "buy" && normalized.type === "market" && normalized.quoteCost) {
         params.quoteOrderQty = normalized.quoteCost;
       }
+      if (normalized.stopLoss) {
+        params.stopLossPrice = normalized.stopLoss;
+      }
+      if (normalized.takeProfit) {
+        params.takeProfitPrice = normalized.takeProfit;
+      }
 
-      const raw = await withTimeout(
-        this.client.createOrder(
-          normalized.symbol,
-          normalized.type,
-          normalized.side,
-          normalized.amount,
-          normalized.price,
-          params
-        ),
-        this.timeoutMs,
-        "BINANCE_SPOT_CREATE_ORDER_TIMEOUT"
-      );
+      let raw: CcxtOrder;
+      let nativeProtectionApplied = false;
+      try {
+        raw = await withTimeout(
+          this.client.createOrder(
+            normalized.symbol,
+            normalized.type,
+            normalized.side,
+            normalized.amount,
+            normalized.price,
+            params
+          ),
+          this.timeoutMs,
+          "BINANCE_SPOT_CREATE_ORDER_TIMEOUT"
+        );
+        nativeProtectionApplied = isNativeProtectionApplied(raw, normalized);
+      } catch (nativeError) {
+        if (!(normalized.stopLoss || normalized.takeProfit)) {
+          throw nativeError;
+        }
+        if (!isNativeProtectionUnsupportedError(nativeError)) {
+          throw nativeError;
+        }
+        delete params.stopLossPrice;
+        delete params.takeProfitPrice;
+        raw = await withTimeout(
+          this.client.createOrder(
+            normalized.symbol,
+            normalized.type,
+            normalized.side,
+            normalized.amount,
+            normalized.price,
+            params
+          ),
+          this.timeoutMs,
+          "BINANCE_SPOT_CREATE_ORDER_TIMEOUT"
+        );
+      }
       const result = this.mapOrder(raw, normalized.symbol, normalized.side, normalized.type, normalized.tif);
+      try {
+        result.protection = await this.attachOrQueueProtection(
+          normalized,
+          result,
+          nativeProtectionApplied ? "native" : "fallback"
+        );
+      } catch (protectionError) {
+        await this.telemetrySink.emitMetric({
+          name: "protection_create_failure",
+          value: 1,
+          timestamp: new Date().toISOString(),
+          tags: this.tags("spot_protection_create", { symbol: normalized.symbol }),
+        });
+        throw protectionError;
+      }
       await this.emitActionSuccess(action, started, {
         symbol: normalized.symbol,
         side: normalized.side,
@@ -441,6 +554,67 @@ export class BinanceSpotTradingService {
     }, { symbol: symbol.trim().toUpperCase() });
   }
 
+  public async armProtectionManual(
+    input: {
+      symbol: string;
+      side: "buy" | "sell";
+      amount: number;
+      stopLoss?: number;
+      takeProfit?: number;
+    },
+    ctx: SpotActionContext
+  ): Promise<ProtectionSummary> {
+    this.setRunContext(ctx);
+    return this.runAction("spot_arm_protection", async () => {
+      if (!this.protectionStore) {
+        throw new SpotGuardError("SPOT_PROTECTION_STORE_DISABLED", "Protection requires protectionDbPath configuration.");
+      }
+      const symbol = input.symbol.trim().toUpperCase();
+      const amount = asPositive(input.amount);
+      const stopLoss = asPositive(input.stopLoss);
+      const takeProfit = asPositive(input.takeProfit);
+      if (!amount) {
+        throw new SpotGuardError("SPOT_AMOUNT_REQUIRED", "Manual protection requires amount > 0.");
+      }
+      if (!stopLoss && !takeProfit) {
+        throw new SpotGuardError("SPOT_PROTECTION_TARGET_REQUIRED", "Provide stopLoss and/or takeProfit.");
+      }
+      const market = await this.guardSymbol(symbol);
+      this.assertAmountGuard(symbol, amount, market);
+      if (stopLoss) this.assertPriceGuard(symbol, stopLoss, market);
+      if (takeProfit) this.assertPriceGuard(symbol, takeProfit, market);
+      await this.assertProtectionPriceDirection({
+        symbol,
+        side: input.side,
+        stopLoss,
+        takeProfit,
+      });
+      const parentOrderId = `manual-${Date.now()}-${Math.round(Math.random() * 1_000_000)}`;
+      const group = this.protectionStore.upsertPending({
+        scope: "spot",
+        symbol,
+        parentOrderId,
+        parentSide: input.side,
+        parentType: "market",
+        slPrice: stopLoss,
+        tpPrice: takeProfit,
+      });
+      const created = await this.createSpotProtectionOrders(symbol, input.side, amount, stopLoss, takeProfit);
+      this.protectionStore.markActive(group.id, {
+        mode: created.mode,
+        slOrderId: created.slOrderId,
+        tpOrderId: created.tpOrderId,
+      });
+      return {
+        enabled: true,
+        mode: created.mode,
+        parentOrderId,
+        slOrderId: created.slOrderId,
+        tpOrderId: created.tpOrderId,
+      };
+    }, { symbol: input.symbol.trim().toUpperCase() });
+  }
+
   private async runAction<T>(
     action: string,
     fn: () => Promise<T>,
@@ -534,6 +708,8 @@ export class BinanceSpotTradingService {
     const amount = asPositive(request.amount);
     const quoteCost = asPositive(request.quoteCost);
     const price = asPositive(request.price);
+    const stopLoss = asPositive(request.stopLoss);
+    const takeProfit = asPositive(request.takeProfit);
 
     if (type === "limit") {
       if (!amount) {
@@ -556,7 +732,20 @@ export class BinanceSpotTradingService {
     if (price) {
       this.assertPriceGuard(symbol, price, market);
     }
+    if (stopLoss) {
+      this.assertPriceGuard(symbol, stopLoss, market);
+    }
+    if (takeProfit) {
+      this.assertPriceGuard(symbol, takeProfit, market);
+    }
     await this.assertNotionalGuard(market, symbol, amount, quoteCost, price);
+    await this.assertProtectionPriceDirection({
+      symbol,
+      side,
+      basePrice: price,
+      stopLoss,
+      takeProfit,
+    });
 
     return {
       symbol,
@@ -565,6 +754,8 @@ export class BinanceSpotTradingService {
       amount,
       quoteCost,
       price,
+      stopLoss,
+      takeProfit,
       tif,
       clientOrderId: request.clientOrderId,
     };
@@ -639,6 +830,342 @@ export class BinanceSpotTradingService {
         "SPOT_NOTIONAL_BELOW_MIN",
         `Estimated notional ${estimatedCost.toFixed(8)} < min ${minCost}.`
       );
+    }
+  }
+
+  private async assertProtectionPriceDirection(input: {
+    symbol: string;
+    side: "buy" | "sell";
+    basePrice?: number;
+    stopLoss?: number;
+    takeProfit?: number;
+  }): Promise<void> {
+    if (!input.stopLoss && !input.takeProfit) return;
+    let refPrice = input.basePrice ?? 0;
+    if (!(refPrice > 0)) {
+      const ticker = await withTimeout(
+        this.client.fetchTicker(input.symbol),
+        this.timeoutMs,
+        "BINANCE_SPOT_TICKER_FOR_PROTECTION_GUARD_TIMEOUT"
+      );
+      refPrice = asNum(ticker.last) || asNum(ticker.bid) || asNum(ticker.ask);
+    }
+    if (!(refPrice > 0)) {
+      throw new SpotGuardError("SPOT_PROTECTION_REFERENCE_PRICE_MISSING", "Unable to infer reference price for SL/TP validation.");
+    }
+    if (input.side === "buy") {
+      if (input.stopLoss && input.stopLoss >= refPrice) {
+        throw new SpotGuardError("SPOT_STOP_LOSS_INVALID", `Stop-loss ${input.stopLoss} must be below reference price ${refPrice}.`);
+      }
+      if (input.takeProfit && input.takeProfit <= refPrice) {
+        throw new SpotGuardError("SPOT_TAKE_PROFIT_INVALID", `Take-profit ${input.takeProfit} must be above reference price ${refPrice}.`);
+      }
+      return;
+    }
+    if (input.stopLoss && input.stopLoss <= refPrice) {
+      throw new SpotGuardError("SPOT_STOP_LOSS_INVALID", `Stop-loss ${input.stopLoss} must be above reference price ${refPrice}.`);
+    }
+    if (input.takeProfit && input.takeProfit >= refPrice) {
+      throw new SpotGuardError("SPOT_TAKE_PROFIT_INVALID", `Take-profit ${input.takeProfit} must be below reference price ${refPrice}.`);
+    }
+  }
+
+  private async attachOrQueueProtection(
+    request: SpotOrderRequest,
+    parent: SpotOrderResult,
+    preferredMode: ProtectionModeRecord
+  ): Promise<ProtectionSummary | undefined> {
+    if (!request.stopLoss && !request.takeProfit) return undefined;
+    const parentId = parent.orderId;
+    if (!parentId) {
+      throw new SpotGuardError("SPOT_PARENT_ORDER_ID_MISSING", "Parent order id missing while creating protections.");
+    }
+    if (preferredMode === "native") {
+      return {
+        enabled: true,
+        mode: "native",
+        parentOrderId: parentId,
+      };
+    }
+    if (!this.protectionStore) {
+      throw new SpotGuardError("SPOT_PROTECTION_STORE_DISABLED", "Protection requires protectionDbPath configuration.");
+    }
+    const group = this.protectionStore.upsertPending({
+      scope: "spot",
+      symbol: request.symbol,
+      parentOrderId: parentId,
+      parentSide: request.side,
+      parentType: request.type,
+      slPrice: request.stopLoss,
+      tpPrice: request.takeProfit,
+    });
+    const filled = asNum(parent.filled);
+    if (request.type === "limit") {
+      const totalAmount = asNum(parent.amount) || asNum(request.amount);
+      const finalStatus = ["closed", "filled"].includes(String(parent.status ?? "").toLowerCase());
+      const fullyFilled = finalStatus || (totalAmount > 0 && filled >= totalAmount);
+      if (!fullyFilled) {
+        return {
+          enabled: true,
+          mode: preferredMode,
+          parentOrderId: parentId,
+        };
+      }
+    }
+    const quantity = filled > 0 ? filled : asNum(request.amount);
+    if (!(quantity > 0)) {
+      throw new SpotGuardError("SPOT_PROTECTION_AMOUNT_UNKNOWN", "Unable to determine filled amount for SL/TP.");
+    }
+    const created = await this.createSpotProtectionOrders(
+      request.symbol,
+      request.side,
+      quantity,
+      request.stopLoss,
+      request.takeProfit
+    );
+    this.protectionStore.markActive(group.id, {
+      mode: created.mode,
+      slOrderId: created.slOrderId,
+      tpOrderId: created.tpOrderId,
+    });
+    await this.telemetrySink.emitMetric({
+      name: "protection_create_success",
+      value: 1,
+      timestamp: new Date().toISOString(),
+      tags: this.tags("spot_protection_create", { symbol: request.symbol, mode: created.mode }),
+    });
+    if (created.mode === "fallback") {
+      await this.telemetrySink.emitMetric({
+        name: "protection_fallback_used",
+        value: 1,
+        timestamp: new Date().toISOString(),
+        tags: this.tags("spot_protection_create", { symbol: request.symbol }),
+      });
+    }
+    return {
+      enabled: true,
+      mode: created.mode,
+      parentOrderId: parentId,
+      slOrderId: created.slOrderId,
+      tpOrderId: created.tpOrderId,
+    };
+  }
+
+  private async createSpotProtectionOrders(
+    symbol: string,
+    parentSide: "buy" | "sell",
+    amount: number,
+    stopLoss?: number,
+    takeProfit?: number
+  ): Promise<{ mode: ProtectionModeRecord; slOrderId?: string; tpOrderId?: string }> {
+    const closeSide: "buy" | "sell" = parentSide === "buy" ? "sell" : "buy";
+    const created: { mode: ProtectionModeRecord; slOrderId?: string; tpOrderId?: string } = { mode: "fallback" };
+    const rollbackCreated = async (): Promise<void> => {
+      for (const orderId of [created.slOrderId, created.tpOrderId]) {
+        if (!orderId) continue;
+        try {
+          await withTimeout(
+            this.client.cancelOrder(orderId, symbol, { recvWindow: this.recvWindow }),
+            this.timeoutMs,
+            "BINANCE_SPOT_CANCEL_PROTECTION_ROLLBACK_TIMEOUT"
+          );
+        } catch {
+          // best-effort rollback
+        }
+      }
+    };
+    let mode: ProtectionModeRecord = "fallback";
+    try {
+      if (stopLoss) {
+        const sl = await withTimeout(
+          this.client.createOrder(symbol, "STOP_LOSS_LIMIT", closeSide, amount, stopLoss, {
+            recvWindow: this.recvWindow,
+            stopPrice: stopLoss,
+            timeInForce: "GTC",
+          }),
+          this.timeoutMs,
+          "BINANCE_SPOT_CREATE_SL_TIMEOUT"
+        );
+        created.slOrderId = sl.id ? String(sl.id) : undefined;
+      }
+      if (takeProfit) {
+        const tp = await withTimeout(
+          this.client.createOrder(symbol, "TAKE_PROFIT_LIMIT", closeSide, amount, takeProfit, {
+            recvWindow: this.recvWindow,
+            stopPrice: takeProfit,
+            timeInForce: "GTC",
+          }),
+          this.timeoutMs,
+          "BINANCE_SPOT_CREATE_TP_TIMEOUT"
+        );
+        created.tpOrderId = tp.id ? String(tp.id) : undefined;
+      }
+      mode = "native";
+    } catch {
+      mode = "fallback";
+      try {
+        if (stopLoss && !created.slOrderId) {
+          const sl = await withTimeout(
+            this.client.createOrder(symbol, "limit", closeSide, amount, stopLoss, {
+              recvWindow: this.recvWindow,
+              triggerPrice: stopLoss,
+            }),
+            this.timeoutMs,
+            "BINANCE_SPOT_CREATE_SL_FALLBACK_TIMEOUT"
+          );
+          created.slOrderId = sl.id ? String(sl.id) : undefined;
+        }
+        if (takeProfit && !created.tpOrderId) {
+          const tp = await withTimeout(
+            this.client.createOrder(symbol, "limit", closeSide, amount, takeProfit, {
+              recvWindow: this.recvWindow,
+              triggerPrice: takeProfit,
+            }),
+            this.timeoutMs,
+            "BINANCE_SPOT_CREATE_TP_FALLBACK_TIMEOUT"
+          );
+          created.tpOrderId = tp.id ? String(tp.id) : undefined;
+        }
+      } catch (fallbackError) {
+        await rollbackCreated();
+        throw fallbackError;
+      }
+    }
+    return { mode, slOrderId: created.slOrderId, tpOrderId: created.tpOrderId };
+  }
+
+  private startProtectionMonitor(): void {
+    if (!this.protectionStore || this.monitorTimer) return;
+    const scheduleNext = (): void => {
+      this.monitorTimer = setTimeout(async () => {
+        this.monitorTimer = null;
+        if (!this.protectionStore) return;
+        if (this.isProtectionMonitorRunning) {
+          scheduleNext();
+          return;
+        }
+        this.isProtectionMonitorRunning = true;
+        try {
+          await this.monitorProtectionGroups();
+        } finally {
+          this.isProtectionMonitorRunning = false;
+          scheduleNext();
+        }
+      }, 5000);
+      this.monitorTimer.unref();
+    };
+    scheduleNext();
+  }
+
+  private async monitorProtectionGroups(): Promise<void> {
+    if (!this.protectionStore) return;
+    const started = Date.now();
+    const nowIso = new Date().toISOString();
+    try {
+      const pendingRows = this.protectionStore.listByStatuses(["pending_parent"], 100).filter((row) => row.scope === "spot");
+      for (const row of pendingRows) {
+        try {
+          const parent = await this.client.fetchOrder(row.parentOrderId, row.symbol, { recvWindow: this.recvWindow });
+          const status = String(parent.status ?? "").toLowerCase();
+          const filled = asNum(parent.filled);
+          const parentAmount = asNum(parent.amount);
+          const fullyFilled = status === "closed" || (parentAmount > 0 && filled >= parentAmount);
+          if (fullyFilled) {
+            const amount = parentAmount > 0 ? parentAmount : filled;
+            if (!(amount > 0)) {
+              this.protectionStore.markError(row.id, "SPOT_PROTECTION_AMOUNT_UNKNOWN");
+              continue;
+            }
+            const created = await this.createSpotProtectionOrders(
+              row.symbol,
+              row.parentSide,
+              amount,
+              row.slPrice,
+              row.tpPrice
+            );
+            this.protectionStore.markActive(row.id, {
+              mode: created.mode,
+              slOrderId: created.slOrderId,
+              tpOrderId: created.tpOrderId,
+            });
+          } else if (filled > 0) {
+            continue;
+          } else if (["canceled", "cancelled", "expired", "rejected"].includes(status)) {
+            this.protectionStore.markClosed(row.id);
+          }
+        } catch (error) {
+          const retries = this.protectionStore.recordMonitorError(row.id, String(error));
+          if (retries > this.protectionMonitorRetryBudget) {
+            this.protectionStore.markError(row.id, String(error));
+          }
+        }
+      }
+
+      const activeRows = this.protectionStore.listByStatuses(["active"], 100).filter((row) => row.scope === "spot");
+      for (const row of activeRows) {
+        try {
+          if (!row.slOrderId && !row.tpOrderId) {
+            this.protectionStore.markError(row.id, "SPOT_PROTECTION_ORPHAN");
+            continue;
+          }
+          const slStatus = row.slOrderId
+            ? await this.client.fetchOrder(row.slOrderId, row.symbol, { recvWindow: this.recvWindow })
+            : undefined;
+          const tpStatus = row.tpOrderId
+            ? await this.client.fetchOrder(row.tpOrderId, row.symbol, { recvWindow: this.recvWindow })
+            : undefined;
+          const slClosed = slStatus ? ["closed", "filled"].includes(String(slStatus.status ?? "").toLowerCase()) : false;
+          const tpClosed = tpStatus ? ["closed", "filled"].includes(String(tpStatus.status ?? "").toLowerCase()) : false;
+
+          if (slClosed || tpClosed) {
+            if (slClosed && row.tpOrderId) {
+              await this.client.cancelOrder(row.tpOrderId, row.symbol, { recvWindow: this.recvWindow });
+              await this.telemetrySink.emitMetric({
+                name: "protection_pair_cancel_success",
+                value: 1,
+                timestamp: nowIso,
+                tags: this.tags("spot_protection_pair_cancel", { symbol: row.symbol }),
+              });
+            } else if (tpClosed && row.slOrderId) {
+              await this.client.cancelOrder(row.slOrderId, row.symbol, { recvWindow: this.recvWindow });
+              await this.telemetrySink.emitMetric({
+                name: "protection_pair_cancel_success",
+                value: 1,
+                timestamp: nowIso,
+                tags: this.tags("spot_protection_pair_cancel", { symbol: row.symbol }),
+              });
+            }
+            this.protectionStore.markClosed(row.id);
+          }
+        } catch (error) {
+          await this.telemetrySink.emitMetric({
+            name: "protection_pair_cancel_failure",
+            value: 1,
+            timestamp: nowIso,
+            tags: this.tags("spot_protection_pair_cancel", { symbol: row.symbol }),
+          });
+          const retries = this.protectionStore.recordMonitorError(row.id, String(error));
+          if (retries > this.protectionMonitorRetryBudget) {
+            this.protectionStore.markError(row.id, String(error));
+          }
+        }
+      }
+
+      await this.telemetrySink.emitMetric({
+        name: "protection_monitor_cycle_latency_ms",
+        value: Date.now() - started,
+        timestamp: nowIso,
+        tags: this.tags("spot_protection_monitor"),
+      });
+    } catch (error) {
+      await this.telemetrySink.emitAlert({
+        timestamp: nowIso,
+        name: "spot_protection_monitor_failed",
+        severity: "warning",
+        trace_id: this.lastTraceId,
+        tags: this.tags("spot_protection_monitor"),
+        message: String(error),
+      });
     }
   }
 

@@ -577,7 +577,11 @@ export const runDeterministicChecks = async (): Promise<void> => {
     "Fail-hard account provider should throw on balance fetch error"
   );
 
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vexis-obs-"));
+  const dbPath = path.join(tmpDir, "observability.db");
+
   const spotTelemetry = new InMemoryTelemetrySink(false);
+  let spotCreateOrderCalls = 0;
   const mockSpotClient = {
     loadMarkets: async () => ({
       "BTC/USDT": {
@@ -594,9 +598,10 @@ export const runDeterministicChecks = async (): Promise<void> => {
       type: string,
       side: string,
       amount?: number,
-      price?: number
+      price?: number,
+      params?: Record<string, unknown>
     ) => ({
-      id: "order-1",
+      id: `spot-order-${++spotCreateOrderCalls}`,
       symbol,
       status: "open",
       side,
@@ -606,6 +611,7 @@ export const runDeterministicChecks = async (): Promise<void> => {
       filled: 0,
       remaining: amount,
       cost: amount && price ? amount * price : 0,
+      reduceOnly: Boolean(params?.reduceOnly),
       timestamp: 1700000000000
     }),
     fetchOrder: async (id: string, symbol: string) => ({
@@ -672,6 +678,7 @@ export const runDeterministicChecks = async (): Promise<void> => {
     defaultTif: "GTC",
     recvWindow: 10000,
     timeoutMs: 5000,
+    protectionDbPath: dbPath,
     telemetrySink: spotTelemetry,
     mode: "paper",
     client: mockSpotClient
@@ -707,6 +714,21 @@ export const runDeterministicChecks = async (): Promise<void> => {
     (error: unknown) => error instanceof SpotGuardError,
     "Spot guard should reject amount below minimum"
   );
+  await assert.rejects(
+    () =>
+      spotService.placeOrder(
+        {
+          symbol: "BTC/USDT",
+          side: "buy",
+          type: "market",
+          amount: 0.01,
+          stopLoss: 80000
+        },
+        { runId: "spot-2b", traceId: "spot-2b", mode: "paper" }
+      ),
+    (error: unknown) => error instanceof SpotGuardError,
+    "Spot guard should reject invalid SL direction"
+  );
 
   const placed = await spotService.placeOrder(
     {
@@ -718,7 +740,20 @@ export const runDeterministicChecks = async (): Promise<void> => {
     },
     { runId: "spot-3", traceId: "spot-3", mode: "paper" }
   );
-  assert.equal(placed.orderId, "order-1", "Spot placeOrder should map order id");
+  assert.ok(placed.orderId.startsWith("spot-order-"), "Spot placeOrder should map order id");
+
+  const placedWithProtection = await spotService.placeOrder(
+    {
+      symbol: "BTC/USDT",
+      side: "buy",
+      type: "market",
+      amount: 0.01,
+      stopLoss: 69000,
+      takeProfit: 72000
+    },
+    { runId: "spot-3b", traceId: "spot-3b", mode: "paper" }
+  );
+  assert.equal(placedWithProtection.protection?.enabled, true, "Spot order should attach protection metadata");
 
   const quote = await spotService.fetchQuote("BTC/USDT", { runId: "spot-4", traceId: "spot-4", mode: "paper" }, 1);
   assert.ok(quote.bid > 0 && quote.ask > 0, "Spot quote should include bid/ask");
@@ -774,7 +809,7 @@ export const runDeterministicChecks = async (): Promise<void> => {
       symbol: string,
       type: string,
       side: string,
-      amount: number,
+      amount?: number,
       price?: number,
       _params?: Record<string, unknown>
     ) => {
@@ -791,7 +826,7 @@ export const runDeterministicChecks = async (): Promise<void> => {
         average: price,
         filled: 0,
         remaining: amount,
-        cost: amount * (price ?? 70000),
+        cost: (amount ?? 0) * (price ?? 70000),
         reduceOnly: Boolean(_params?.reduceOnly),
         timestamp: 1700000000000
       };
@@ -887,6 +922,7 @@ export const runDeterministicChecks = async (): Promise<void> => {
     defaultLeverage: 3,
     marginMode: "isolated",
     positionMode: "hedge",
+    protectionDbPath: dbPath,
     telemetrySink: futuresTelemetry,
     mode: "paper",
     usdmClient: makeMockFuturesClient("usdm"),
@@ -923,6 +959,22 @@ export const runDeterministicChecks = async (): Promise<void> => {
       ),
     (error: unknown) => error instanceof FuturesGuardError,
     "Futures guard should reject amount below min"
+  );
+  await assert.rejects(
+    () =>
+      futuresService.placeOrder(
+        {
+          scope: "usdm",
+          symbol: "BTC/USDT:USDT",
+          side: "buy",
+          type: "market",
+          amount: 0.01,
+          stopLoss: 90000
+        },
+        { runId: "fut-2b", traceId: "fut-2b", mode: "paper" }
+      ),
+    (error: unknown) => error instanceof FuturesGuardError,
+    "Futures guard should reject invalid SL direction"
   );
 
   const usdmPlaced = await futuresService.placeOrder(
@@ -970,6 +1022,20 @@ export const runDeterministicChecks = async (): Promise<void> => {
   assert.equal(usdmLoaded >= 1, true, "USD-M market metadata should be loaded");
   assert.equal(coinmLoaded >= 1, true, "COIN-M market metadata should be loaded");
 
+  const futProtected = await futuresService.placeOrder(
+    {
+      scope: "usdm",
+      symbol: "BTC/USDT:USDT",
+      side: "buy",
+      type: "market",
+      amount: 0.01,
+      stopLoss: 69000,
+      takeProfit: 72000
+    },
+    { runId: "fut-5b", traceId: "fut-5b", mode: "paper" }
+  );
+  assert.equal(futProtected.protection?.enabled, true, "Futures order should attach protection metadata");
+
   const futQuote = await futuresService.fetchQuote(
     "usdm",
     "BTC/USDT:USDT",
@@ -999,9 +1065,6 @@ export const runDeterministicChecks = async (): Promise<void> => {
   const delayAttempt2 = computeBackoffDelay({ maxAttempts: 3, initialDelayMs: 100, backoffFactor: 2, maxDelayMs: 1000, jitterMs: 0 }, 2);
   assert.equal(delayAttempt1, 100, "Backoff attempt 1 should match initial delay when jitter is 0");
   assert.equal(delayAttempt2, 200, "Backoff attempt 2 should scale by factor");
-
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vexis-obs-"));
-  const dbPath = path.join(tmpDir, "observability.db");
 
   const sqliteTelemetry = new SqliteTelemetrySink(dbPath);
   await sqliteTelemetry.emitMetric({
