@@ -276,7 +276,6 @@ const normalizeGlobalOptions = (command: Command): CliGlobalOptions => {
   return {
     json: Boolean(raw.json),
     output: parseOutput(typeof raw.output === "string" ? raw.output : undefined),
-    mode: parseMode(typeof raw.mode === "string" ? raw.mode : undefined),
     envFile: typeof raw.envFile === "string" ? raw.envFile : undefined
   };
 };
@@ -363,11 +362,11 @@ const resolveRuntimeConfig = (
   const { runtime, meta } = loadRuntimeConfigWithMeta({ envFile: global.envFile });
   const envOrDefault = (name: string): "env" | "default" =>
     meta.keySource[name] && meta.keySource[name] !== "default" ? "env" : "default";
-  const modeFromEnv = parseMode(meta.resolvedValues.PIPELINE_MODE) ?? "backtest";
+  const modeFromEnv = parseMode(meta.resolvedValues.PIPELINE_MODE) ?? "paper";
   const outputFromEnv = parseOutput(meta.resolvedValues.OUTPUT_FORMAT) ?? "pretty";
 
   const effective: Record<string, JSONValue> = {
-    mode: global.mode ?? modeFromEnv,
+    mode: modeFromEnv,
     output: global.output ?? outputFromEnv,
     env_file: global.envFile ?? "",
     env_files_loaded: meta.loadedFiles,
@@ -376,6 +375,15 @@ const resolveRuntimeConfig = (
     runner_interval_seconds: overrides.runnerIntervalSeconds ?? runtime.runnerIntervalSeconds,
     runner_candle_align: overrides.runnerCandleAlign ?? runtime.runnerCandleAlign,
     runner_max_backoff_seconds: overrides.runnerMaxBackoffSeconds ?? runtime.runnerMaxBackoffSeconds,
+    journaling_enabled: runtime.journalingEnabled,
+    journaling_base_url: runtime.journalingBaseUrl,
+    journaling_api_key: maskSecret(runtime.journalingApiKey),
+    journaling_timeout_ms: runtime.journalingTimeoutMs,
+    journaling_retry_max_attempts: runtime.journalingRetryMaxAttempts,
+    journaling_retry_initial_delay_ms: runtime.journalingRetryInitialDelayMs,
+    journaling_retry_max_delay_ms: runtime.journalingRetryMaxDelayMs,
+    journaling_retry_backoff_factor: runtime.journalingRetryBackoffFactor,
+    journaling_retry_jitter_ms: runtime.journalingRetryJitterMs,
     binance_account_enabled: runtime.binanceAccountEnabled,
     strict_real_mode: runtime.strictRealMode,
     obs_persist_enabled: runtime.obsPersistEnabled,
@@ -400,7 +408,7 @@ const resolveRuntimeConfig = (
   };
 
   const source: Record<string, "flag" | "env" | "default"> = {
-    mode: global.mode ? "flag" : envOrDefault("PIPELINE_MODE"),
+    mode: envOrDefault("PIPELINE_MODE"),
     output: global.output ? "flag" : envOrDefault("OUTPUT_FORMAT"),
     env_file: global.envFile ? "flag" : "default",
     env_files_loaded: meta.loadedFiles.length > 0 ? "env" : "default",
@@ -424,6 +432,15 @@ const resolveRuntimeConfig = (
       overrides.runnerMaxBackoffSeconds !== undefined
         ? "flag"
         : envOrDefault("RUNNER_MAX_BACKOFF_SECONDS"),
+    journaling_enabled: envOrDefault("JOURNALING_ENABLED"),
+    journaling_base_url: envOrDefault("JOURNALING_BASE_URL"),
+    journaling_api_key: envOrDefault("JOURNALING_API_KEY"),
+    journaling_timeout_ms: envOrDefault("JOURNALING_TIMEOUT_MS"),
+    journaling_retry_max_attempts: envOrDefault("JOURNALING_RETRY_MAX_ATTEMPTS"),
+    journaling_retry_initial_delay_ms: envOrDefault("JOURNALING_RETRY_INITIAL_DELAY_MS"),
+    journaling_retry_max_delay_ms: envOrDefault("JOURNALING_RETRY_MAX_DELAY_MS"),
+    journaling_retry_backoff_factor: envOrDefault("JOURNALING_RETRY_BACKOFF_FACTOR"),
+    journaling_retry_jitter_ms: envOrDefault("JOURNALING_RETRY_JITTER_MS"),
     binance_account_enabled: envOrDefault("BINANCE_ACCOUNT_ENABLED"),
     strict_real_mode: envOrDefault("STRICT_REAL_MODE"),
     obs_persist_enabled: envOrDefault("OBS_PERSIST_ENABLED"),
@@ -1060,7 +1077,6 @@ const toRunOverrides = (
   options: CommonRunOptions,
   extra?: Partial<AppRunOverrides>
 ): AppRunOverrides => ({
-  mode: global.mode,
   outputFormat: global.output ?? (global.json ? "json" : undefined),
   envFile: global.envFile,
   showTelemetry: options.showTelemetry,
@@ -1709,7 +1725,6 @@ program
   .description("Vexis trading desk CLI")
   .option("--json", "JSON output")
   .option("--output <format>", "Output format: pretty|json")
-  .option("--mode <mode>", "Pipeline mode: backtest|paper|live-sim")
   .option("--env-file <path>", "Custom env file path (lower precedence than OS env)")
   .showHelpAfterError();
 

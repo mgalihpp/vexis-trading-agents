@@ -237,26 +237,26 @@ const extractBullets = (
       };
     }
     case "BullishResearcher": {
-      const args = Array.isArray(output.bullish_arguments)
-        ? output.bullish_arguments
+      const args = Array.isArray(output.arguments)
+        ? output.arguments
         : [];
       return {
         headline: "Bullish thesis prepared",
         bullets: [
           `top_argument=${toString(args[0]) ?? "n/a"}`,
-          `reward_est=${formatNum(output.reward_estimate_pct, 2)}%`,
+          `est=${formatNum(output.risk_or_reward_estimate_pct, 2)}%`,
         ],
       };
     }
     case "BearishResearcher": {
-      const args = Array.isArray(output.bearish_arguments)
-        ? output.bearish_arguments
+      const args = Array.isArray(output.arguments)
+        ? output.arguments
         : [];
       return {
         headline: "Bearish thesis prepared",
         bullets: [
           `top_argument=${toString(args[0]) ?? "n/a"}`,
-          `confidence=${formatNum(output.confidence)}`,
+          `est=${formatNum(output.risk_or_reward_estimate_pct, 2)}%`,
         ],
       };
     }

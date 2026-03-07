@@ -103,13 +103,15 @@ export const technicalAnalysisSchema = z.object({
 });
 
 export const bullishResearchSchema = z.object({
-  bullish_arguments: z.array(z.string()),
-  reward_estimate_pct: z.number(),
+  arguments: z.array(z.string()),
+  risk_or_reward_estimate_pct: z.number(),
+  failure_modes: z.array(z.string()),
   confidence: z.number().min(0).max(1)
 });
 
 export const bearishResearchSchema = z.object({
-  bearish_arguments: z.array(z.string()),
+  arguments: z.array(z.string()),
+  risk_or_reward_estimate_pct: z.number(),
   failure_modes: z.array(z.string()),
   confidence: z.number().min(0).max(1)
 });

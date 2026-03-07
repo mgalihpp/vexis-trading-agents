@@ -77,27 +77,17 @@ export interface RealDataProviderConfig {
   };
 }
 
-const symbolToCoinGeckoId = (asset: string): string => {
-  const base = asset.split("/")[0]?.toUpperCase() ?? "";
-  const map: Record<string, string> = {
-    BTC: "bitcoin",
-    ETH: "ethereum",
-    SOL: "solana",
-    BNB: "binancecoin",
-    XRP: "ripple",
-    ADA: "cardano",
-  };
-  const mapped = map[base];
-  if (!mapped) {
-    throw new ProviderError(
-      "asset-mapper",
-      400,
-      "UNSUPPORTED_ASSET",
-      `Unsupported asset mapping for ${asset}`,
-    );
-  }
-  return mapped;
+const STATIC_COINGECKO_SYMBOL_MAP: Record<string, string> = {
+  BTC: "bitcoin",
+  ETH: "ethereum",
+  SOL: "solana",
+  BNB: "binancecoin",
+  XRP: "ripple",
+  ADA: "cardano",
 };
+
+const normalizeAssetBase = (asset: string): string =>
+  asset.split("/")[0]?.trim().toUpperCase() ?? "";
 
 const defaultBacktestFundamentals = (lastPrice: number): FundamentalsData => ({
   peRatio: 19,
@@ -157,6 +147,10 @@ const toStatus = <T>(args: {
 });
 
 class CoinGeckoFundamentalsProvider implements FundamentalsProvider {
+  private readonly idCache = new Map<string, string>(
+    Object.entries(STATIC_COINGECKO_SYMBOL_MAP),
+  );
+
   public constructor(
     private readonly apiKey: string,
     private readonly baseUrl: string,
@@ -169,11 +163,9 @@ class CoinGeckoFundamentalsProvider implements FundamentalsProvider {
     asset: string,
   ): Promise<ProviderFetchResult<FundamentalsData>> {
     await this.governor.waitTurn("coingecko");
-    const id = symbolToCoinGeckoId(asset);
+    const id = await this.resolveCoinGeckoId(asset);
     const url = `${this.baseUrl}/coins/markets?vs_currency=usd&ids=${id}&price_change_percentage=24h`;
-    const headers: Record<string, string> = this.apiKey
-      ? { "x-cg-demo-api-key": this.apiKey }
-      : {};
+    const headers = this.coingeckoHeaders();
 
     const started = Date.now();
     const response = await withTimeout(
@@ -235,6 +227,71 @@ class CoinGeckoFundamentalsProvider implements FundamentalsProvider {
       recordCount: rows.length,
       data: fundamentals,
     });
+  }
+
+  private coingeckoHeaders(): Record<string, string> {
+    return this.apiKey ? { "x-cg-demo-api-key": this.apiKey } : {};
+  }
+
+  private async resolveCoinGeckoId(asset: string): Promise<string> {
+    const base = normalizeAssetBase(asset);
+    if (!base) {
+      throw new ProviderError(
+        "asset-mapper",
+        400,
+        "UNSUPPORTED_ASSET",
+        `Unsupported asset mapping for ${asset}`,
+      );
+    }
+
+    const cached = this.idCache.get(base);
+    if (cached) {
+      return cached;
+    }
+
+    await this.governor.waitTurn("coingecko-search");
+    const url = `${this.baseUrl}/search?query=${encodeURIComponent(base)}`;
+    const response = await withTimeout(
+      this.fetchFn(url, { headers: this.coingeckoHeaders() }),
+      this.timeoutMs,
+      "PROVIDER_TIMEOUT:coingecko-search",
+    );
+    if (!response.ok) {
+      throw new ProviderError(
+        "coingecko",
+        response.status,
+        "COINGECKO_SEARCH_HTTP_ERROR",
+        `CoinGecko search request failed (${response.status})`,
+      );
+    }
+
+    const raw = (await response.json()) as { coins?: Array<Record<string, unknown>> };
+    const coins = Array.isArray(raw.coins) ? raw.coins : [];
+    const exact = coins.filter((coin) => {
+      const symbol = String(coin.symbol ?? "").toUpperCase();
+      return symbol === base;
+    });
+    const ranked = exact
+      .map((coin) => {
+        const rankRaw = Number(coin.market_cap_rank ?? Number.MAX_SAFE_INTEGER);
+        const rank = Number.isFinite(rankRaw) && rankRaw > 0 ? rankRaw : Number.MAX_SAFE_INTEGER;
+        return { coin, rank };
+      })
+      .sort((a, b) => a.rank - b.rank);
+    const best = ranked[0]?.coin ?? exact[0];
+    const id = typeof best?.id === "string" ? best.id : undefined;
+
+    if (!id) {
+      throw new ProviderError(
+        "asset-mapper",
+        400,
+        "UNSUPPORTED_ASSET",
+        `Unsupported asset mapping for ${asset}`,
+      );
+    }
+
+    this.idCache.set(base, id);
+    return id;
   }
 }
 
