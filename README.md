@@ -4,12 +4,13 @@ Multi-agent crypto trading desk in TypeScript using LangGraph + LLM reasoning, r
 
 Pipeline:
 
-`Market Data -> Analysts -> Bull/Bear Research -> Debate -> Trader -> Risk -> Portfolio -> Simulated Exchange`
+`Market Data -> Analysts -> Bull/Bear Research -> Debate -> Trader (advisory) -> Risk (advisory) -> Portfolio (advisory) -> ExecutionController (advisory) -> FinalDecisionLLM (mandatory tool-call) -> Simulated Exchange`
 
 ## Features
 
 - LangGraph orchestration with strict typed JSON contracts.
 - LLM decision nodes (OpenRouter) with retry + fallback.
+- LLM-first final authority node (`FinalDecisionLLM`) with mandatory tool-calling.
 - Real crypto inputs (CCXT market, CoinGecko, Alternative.me, Cryptocurrency.cv + NewsAPI).
 - Binance account snapshot integration (spot + USD-M + COIN-M).
 - Binance Spot CCXT action pack (live actions, whitelist guarded).
@@ -191,6 +192,11 @@ OPENROUTER_MODEL=openai/gpt-4o-mini
 LLM_MAX_RETRIES=2
 ```
 
+Notes:
+
+- Final decision is produced by mandatory tool-call (`final_decision_tool`).
+- If mandatory tool-calling fails until retry exhausted, run returns terminal `llm_abort` decision path.
+
 ### Real data providers
 
 ```bash
@@ -202,6 +208,37 @@ ALTERNATIVE_ME_BASE_URL=https://api.alternative.me
 COINGECKO_BASE_URL=https://api.coingecko.com/api/v3
 PROVIDER_CACHE_TTL_SECONDS=300
 ```
+
+### Risk controls (env-driven)
+
+```bash
+RISK_MAX_PER_TRADE_USD=1
+RISK_USD_TOLERANCE=1.1
+RR_MIN_THRESHOLD=1.5
+FUTURES_MAX_LEVERAGE=5
+TP_PARTIAL_SPLIT=50,30,20
+TP_BREAKEVEN_AFTER_TP1=true
+RISK_MAX_PER_TRADE_PCT=1.0
+RISK_MAX_EXPOSURE_PCT=35
+RISK_DRAWDOWN_CUTOFF_PCT=12
+RISK_MAX_ATR_PCT=6
+RISK_MIN_LIQUIDITY_USD=20
+```
+
+Notes:
+
+- Execution is futures-first in run cycle (long/short valid). Spot/futures market data can still be used as analysis input.
+- Main sizing driver is `RISK_MAX_PER_TRADE_USD`.
+- Core sizing math:
+  - `stop_pct = abs(entry - stop_loss) / entry`
+  - `notional_by_risk = RISK_MAX_PER_TRADE_USD / stop_pct`
+  - `target_notional = max(notional_by_risk, exchange_min_notional)`
+  - `effective_risk_usd = target_notional * stop_pct`
+- Trade is rejected if `effective_risk_usd > RISK_MAX_PER_TRADE_USD * RISK_USD_TOLERANCE`.
+- `RR_MIN_THRESHOLD` enforces minimum weighted RR before proposal can continue.
+- TP model is multi-target by default (`1R/2R/3R`) with partial close split from `TP_PARTIAL_SPLIT` and optional SL to breakeven after TP1.
+- `FUTURES_MAX_LEVERAGE` is used for margin-feasibility checks (`required_margin = notional / leverage`), not to increase allowed USD loss.
+- `RISK_MAX_PER_TRADE_PCT` is legacy compatibility fallback.
 
 ### Binance account snapshot
 

@@ -30,8 +30,16 @@ export const formatStreamEvent = (event: DecisionLogEntry): string => conciseLin
 
 export const formatChatStyleRunReport = (input: PrintRunReportInput): string => {
   const lines: string[] = [];
+  const d = input.result.executionDecision;
   lines.push(`Run ${input.runId} (${input.mode}) ${input.query.asset} ${input.query.timeframe}`);
-  lines.push(`Execution portfolio_approved=${String(input.result.executionDecision.portfolio_approved)} executable=${String(input.result.executionDecision.executable)} notional=${input.result.executionDecision.approved_notional_usd}`);
+  lines.push(
+    `Execution venue=${d.execution_venue} portfolio_approved=${String(d.portfolio_approved)} executable=${String(d.executable)} notional=${d.approved_notional_usd}`,
+  );
+  lines.push(
+    `Risk budget=${d.risk_budget_usd ?? "-"} effective_risk=${d.effective_risk_usd ?? "-"} leverage=${d.leverage_used ?? "-"} required_margin=${d.required_margin_usd ?? "-"}`,
+  );
+  if (d.execution_blocker) lines.push(`Blocker ${d.execution_blocker}`);
+  if (d.reasons.length > 0) lines.push(`Reasons ${d.reasons.join(" | ")}`);
   for (const log of input.result.logs) {
     lines.push(`- ${conciseLine(log)}`);
   }
@@ -42,7 +50,7 @@ export const formatPrettyRunReport = (input: PrintRunReportInput): string => for
 
 export const formatRunnerCycleSummary = (input: PrintRunReportInput): string => {
   const decision = input.result.executionDecision;
-  return `[runner] run=${input.runId} asset=${input.query.asset} approved=${String(decision.portfolio_approved)} executable=${String(decision.executable)} notional=${decision.approved_notional_usd}`;
+  return `[runner] run=${input.runId} asset=${input.query.asset} venue=${decision.execution_venue} approved=${String(decision.portfolio_approved)} executable=${String(decision.executable)} notional=${decision.approved_notional_usd} risk=${decision.effective_risk_usd ?? "-"} blocker=${decision.execution_blocker ?? "-"}`;
 };
 
 export const createStreamPrinter = (ctx: {

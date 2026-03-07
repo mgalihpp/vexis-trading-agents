@@ -57,6 +57,17 @@ RUNNER_MAX_BACKOFF_SECONDS=900
 SIM_FEE_BPS=0
 SIM_SLIPPAGE_BPS=0
 SIM_PARTIAL_FILL_ENABLED=false
+RISK_MAX_PER_TRADE_USD=1
+RISK_MAX_PER_TRADE_PCT=1.0
+RISK_USD_TOLERANCE=1.1
+RR_MIN_THRESHOLD=1.5
+FUTURES_MAX_LEVERAGE=5
+TP_PARTIAL_SPLIT=50,30,20
+TP_BREAKEVEN_AFTER_TP1=true
+RISK_MAX_EXPOSURE_PCT=35
+RISK_DRAWDOWN_CUTOFF_PCT=12
+RISK_MAX_ATR_PCT=6
+RISK_MIN_LIQUIDITY_USD=20
 
 BINANCE_API_KEY=
 BINANCE_API_SECRET=
@@ -134,6 +145,17 @@ export interface RuntimeConfig {
   simFeeBps: number;
   simSlippageBps: number;
   simPartialFillEnabled: boolean;
+  riskMaxPerTradeUsd: number;
+  riskMaxPerTradePct: number;
+  riskUsdTolerance: number;
+  rrMinThreshold: number;
+  futuresMaxLeverage: number;
+  tpPartialSplit: number[];
+  tpBreakevenAfterTp1: boolean;
+  riskMaxExposurePct: number;
+  riskDrawdownCutoffPct: number;
+  riskMaxAtrPct: number;
+  riskMinLiquidityUsd: number;
   binanceApiKey: string;
   binanceApiSecret: string;
   binanceAccountEnabled: boolean;
@@ -388,6 +410,20 @@ export const loadRuntimeConfigWithMeta = (options: RuntimeEnvLoadOptions = {}): 
     simFeeBps: asFloat(getRaw("SIM_FEE_BPS"), 0),
     simSlippageBps: asFloat(getRaw("SIM_SLIPPAGE_BPS"), 0),
     simPartialFillEnabled: asBool(getRaw("SIM_PARTIAL_FILL_ENABLED"), false),
+    riskMaxPerTradeUsd: asFloat(getRaw("RISK_MAX_PER_TRADE_USD"), 1),
+    riskMaxPerTradePct: asFloat(getRaw("RISK_MAX_PER_TRADE_PCT"), 1),
+    riskUsdTolerance: asFloat(getRaw("RISK_USD_TOLERANCE"), 1.1),
+    rrMinThreshold: asFloat(getRaw("RR_MIN_THRESHOLD"), 1.5),
+    futuresMaxLeverage: asInt(getRaw("FUTURES_MAX_LEVERAGE"), 5),
+    tpPartialSplit: (getRaw("TP_PARTIAL_SPLIT") ?? "50,30,20")
+      .split(",")
+      .map((v) => Number.parseFloat(v.trim()))
+      .filter((v) => Number.isFinite(v)),
+    tpBreakevenAfterTp1: asBool(getRaw("TP_BREAKEVEN_AFTER_TP1"), true),
+    riskMaxExposurePct: asFloat(getRaw("RISK_MAX_EXPOSURE_PCT"), 35),
+    riskDrawdownCutoffPct: asFloat(getRaw("RISK_DRAWDOWN_CUTOFF_PCT"), 12),
+    riskMaxAtrPct: asFloat(getRaw("RISK_MAX_ATR_PCT"), 6),
+    riskMinLiquidityUsd: asFloat(getRaw("RISK_MIN_LIQUIDITY_USD"), 20),
     binanceApiKey: asSecret(getRaw("BINANCE_API_KEY")),
     binanceApiSecret: asSecret(getRaw("BINANCE_API_SECRET")),
     binanceAccountEnabled: asBool(getRaw("BINANCE_ACCOUNT_ENABLED"), false),
@@ -454,6 +490,16 @@ export const loadRuntimeConfigWithMeta = (options: RuntimeEnvLoadOptions = {}): 
   failIf(cfg.healthServerPort < 1 || cfg.healthServerPort > 65535, "HEALTH_SERVER_PORT must be within 1..65535", meta);
   failIf(cfg.simFeeBps < 0, "SIM_FEE_BPS must be >= 0", meta);
   failIf(cfg.simSlippageBps < 0, "SIM_SLIPPAGE_BPS must be >= 0", meta);
+  failIf(cfg.riskMaxPerTradeUsd < 0, "RISK_MAX_PER_TRADE_USD must be >= 0", meta);
+  failIf(cfg.riskMaxPerTradePct < 0, "RISK_MAX_PER_TRADE_PCT must be >= 0", meta);
+  failIf(cfg.riskUsdTolerance < 1, "RISK_USD_TOLERANCE must be >= 1", meta);
+  failIf(cfg.rrMinThreshold < 0, "RR_MIN_THRESHOLD must be >= 0", meta);
+  failIf(cfg.futuresMaxLeverage < 1 || cfg.futuresMaxLeverage > 125, "FUTURES_MAX_LEVERAGE must be in 1..125", meta);
+  failIf(cfg.tpPartialSplit.length === 0, "TP_PARTIAL_SPLIT must include at least one numeric value", meta);
+  failIf(cfg.riskMaxExposurePct < 0 || cfg.riskMaxExposurePct > 100, "RISK_MAX_EXPOSURE_PCT must be within 0..100", meta);
+  failIf(cfg.riskDrawdownCutoffPct < 0 || cfg.riskDrawdownCutoffPct > 100, "RISK_DRAWDOWN_CUTOFF_PCT must be within 0..100", meta);
+  failIf(cfg.riskMaxAtrPct < 0, "RISK_MAX_ATR_PCT must be >= 0", meta);
+  failIf(cfg.riskMinLiquidityUsd < 0, "RISK_MIN_LIQUIDITY_USD must be >= 0", meta);
   failIf(cfg.binanceAccountScope !== "spot+usdm+coinm", "BINANCE_ACCOUNT_SCOPE currently supports only 'spot+usdm+coinm'", meta);
   failIf(cfg.binanceDefaultExposurePct < 0 || cfg.binanceDefaultExposurePct > 100, "BINANCE_DEFAULT_EXPOSURE_PCT must be within 0..100", meta);
   failIf(cfg.binanceDefaultDrawdownPct < 0 || cfg.binanceDefaultDrawdownPct > 100, "BINANCE_DEFAULT_DRAWDOWN_PCT must be within 0..100", meta);

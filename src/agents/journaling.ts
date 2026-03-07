@@ -8,11 +8,14 @@ import {
 } from "../core/journaling-mapper";
 import type { DecisionRunner } from "../core/llm-runner";
 import type {
+  AdvisorySnapshot,
   AgentContext,
   ExecutionDecision,
   ExecutionReport,
+  FinalDecisionByLLM,
   JournalingClient,
   JournalingEventType,
+  LLMDecisionAbort,
   PipelineMode,
   PortfolioDecision,
   PostTradeEvaluation,
@@ -41,6 +44,9 @@ interface ExecutionInput {
   decision: ExecutionDecision;
   report?: ExecutionReport;
   proposal: ProposalDecision;
+  advisorySnapshot?: AdvisorySnapshot | null;
+  finalDecisionByLLM?: FinalDecisionByLLM | null;
+  llmDecisionAbort?: LLMDecisionAbort | null;
 }
 
 interface PostTradeInput {

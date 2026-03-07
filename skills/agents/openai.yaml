@@ -1,0 +1,4 @@
+interface:
+  display_name: "Vexis CLI"
+  short_description: "Run and operate Vexis trading CLI safely from an AI agent"
+  default_prompt: "Use this skill to build, validate, and run Vexis CLI commands with safe defaults and JSON outputs."

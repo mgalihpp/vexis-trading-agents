@@ -1,5 +1,6 @@
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import type {
+  AdvisorySnapshot,
   Agent,
   AgentContext,
   AnalystBundle,
@@ -10,10 +11,12 @@ import type {
   ExecutionReport,
   JSONValue,
   LLMRunnerResult,
+  LLMDecisionAbort,
   MarketDataProvider,
   MarketDataQuery,
   MarketSnapshot,
   MetricTags,
+  FinalDecisionByLLM,
   PipelineMode,
   PortfolioDecision,
   PortfolioState,
@@ -22,16 +25,19 @@ import type {
   RiskDecision,
   RiskRules,
   TelemetrySink,
-  TradeProposal,
 } from "../types";
 import type { DecisionRunner } from "./llm-runner";
 import {
+  advisorySnapshotSchema,
   bearishResearchSchema,
   bullishResearchSchema,
   decisionEnvelopeSchema,
   debateOutputSchema,
   executionDecisionSchema,
+  finalDecisionByLLMSchema,
+  finalDecisionToolArgsSchema,
   fundamentalsAnalysisSchema,
+  llmDecisionAbortSchema,
   newsAnalysisSchema,
   portfolioDecisionSchema,
   postTradeEvaluationSchema,
@@ -39,7 +45,6 @@ import {
   riskDecisionSchema,
   sentimentAnalysisSchema,
   technicalAnalysisSchema,
-  tradeProposalSchema,
 } from "./schemas";
 import { enforceExecutionHardGuards, enforcePortfolioHardGuards, enforceRiskHardGuards } from "./safety";
 import { BacktestDataProvider, RealCryptoDataProvider } from "./market-data";
@@ -70,13 +75,21 @@ export interface PipelineAgents {
   bullishResearcher: Agent<AnalystBundle, import("../types").BullishResearch>;
   bearishResearcher: Agent<AnalystBundle, import("../types").BearishResearch>;
   debateSynthesizer: Agent<{ bullish: import("../types").BullishResearch; bearish: import("../types").BearishResearch }, import("../types").DebateOutput>;
-  traderAgent: Agent<{ asset: string; lastPrice: number; inputTimeframe: string; analysts: AnalystBundle; debate: import("../types").DebateOutput }, TradeProposal>;
+  traderAgent: Agent<{
+    asset: string;
+    lastPrice: number;
+    inputTimeframe: string;
+    analysts: AnalystBundle;
+    debate: import("../types").DebateOutput;
+    riskRules?: RiskRules;
+  }, ProposalDecision>;
   riskManager: Agent<
     {
       proposal: ProposalDecision;
       portfolio: PortfolioState;
       rules: RiskRules;
       atrPct: number;
+      minOrderNotionalUsd?: number;
       regimeState?: import("../types").RegimeState;
       calibratedProbability?: number;
     },
@@ -84,7 +97,15 @@ export interface PipelineAgents {
   >;
   portfolioManager: Agent<{ proposal: ProposalDecision; risk: RiskDecision; portfolio: PortfolioState }, PortfolioDecision>;
   executionController: Agent<
-    { proposal: ProposalDecision; portfolioDecision: PortfolioDecision; minOrderNotionalUsd?: number; precisionStep?: number; metadataSource?: "exchange" | "fallback_env" },
+    {
+      proposal: ProposalDecision;
+      portfolio: { equityUsd: number; liquidityUsd: number };
+      riskRules: { maxRiskPerTradeUsd?: number; riskUsdTolerance?: number };
+      portfolioDecision: PortfolioDecision;
+      minOrderNotionalUsd?: number;
+      precisionStep?: number;
+      metadataSource?: "exchange" | "fallback_env";
+    },
     ExecutionDecision
   >;
   simulatedExchange: Agent<{ decision: ExecutionDecision; proposal: ProposalDecision; marketPrice: number }, ExecutionReport>;
@@ -131,6 +152,10 @@ export interface PipelineRunRequest {
 
 export interface PipelineRunResult {
   traceId: string;
+  decisionOrigin: "llm_tool_call" | "llm_abort";
+  finalDecisionByLLM: FinalDecisionByLLM | null;
+  llmDecisionAbort: LLMDecisionAbort | null;
+  advisorySnapshot: AdvisorySnapshot | null;
   executionDecision: ExecutionDecision;
   executionReport: ExecutionReport;
   postTradeEvaluation: PostTradeEvaluation | null;
@@ -151,6 +176,9 @@ const TradingState = Annotation.Root({
   proposal: Annotation<ProposalDecision | null>,
   riskDecision: Annotation<RiskDecision | null>,
   portfolioDecision: Annotation<PortfolioDecision | null>,
+  advisorySnapshot: Annotation<AdvisorySnapshot | null>,
+  finalDecisionByLLM: Annotation<FinalDecisionByLLM | null>,
+  llmDecisionAbort: Annotation<LLMDecisionAbort | null>,
   executionDecision: Annotation<ExecutionDecision | null>,
   executionReport: Annotation<ExecutionReport | null>,
   postTradeEvaluation: Annotation<PostTradeEvaluation | null>,
@@ -449,64 +477,17 @@ const buildGraph = (deps: PipelineDeps, ctx: AgentContext, budget: TimeoutBudget
     }))
     .addNode("trader_node", wrapNode("TraderAgent", async (state: TradingStateType) => {
       if (!state.analysts || !state.debate || !state.snapshot) throw new Error("analysts, debate, and snapshot are required for trader");
-      if (
-        state.debate.final_bias === "neutral" ||
-        state.debate.confidence.effective_confidence < 0.45 ||
-        state.debate.decision_stability === "low"
-      ) {
-        const noTrade: import("../types").NoTradeDecision = {
-          no_trade: true,
-          reasons: [
-            "No edge from debate synthesis.",
-            state.debate.key_disagreement,
-            state.debate.decision_stability === "low" ? "Decision stability is low." : "Directional conviction below threshold.",
-          ],
-          dominant_horizon: state.debate.dominant_horizon,
-          confidence: state.debate.confidence,
-          must_monitor_conditions: state.debate.must_monitor_conditions,
-        };
-        const proposal: ProposalDecision = {
-          proposal_type: "no_trade",
-          asset: state.snapshot.asset,
-          input_timeframe: state.query.timeframe,
-          decision_horizon: state.debate.dominant_horizon,
-          reasons: noTrade.reasons,
-          must_monitor_conditions: noTrade.must_monitor_conditions,
-          confidence: state.debate.confidence,
-        };
-        proposalDecisionSchema.parse(proposal);
-        await appendAndNotify(
-          deps,
-          ctx.runId,
-          ctx.traceId,
-          "NoTradeDecision",
-          ctx.nowIso(),
-          state.debate as unknown as JSONValue,
-          noTrade as unknown as JSONValue,
-          "No-trade selected as first-class decision.",
-          "system",
-          0,
-        );
-        await runJournalingHook(() =>
-          deps.journalingAgent!.onProposalCreated(ctx, {
-            asset: state.query.asset,
-            timeframe: state.query.timeframe,
-            proposal,
-            accountBalanceUsd: state.portfolio.equityUsd,
-          }),
-        );
-        return { noTradeDecision: noTrade, proposal, proposalCreatedAtIso: ctx.nowIso() };
-      }
       const input = {
         asset: state.snapshot.asset,
         lastPrice: state.snapshot.lastPrice,
         inputTimeframe: state.query.timeframe,
         analysts: state.analysts,
         debate: state.debate,
+        riskRules: state.riskRules,
       };
       const result = await runDecision({
         config: { nodeName: "TraderAgent", maxRetries: nodeMaxRetries },
-        schema: decisionEnvelopeSchema(tradeProposalSchema),
+        schema: decisionEnvelopeSchema(proposalDecisionSchema),
         systemPrompt: llmPrompt("TraderAgent", "Create proposal only (no final sizing authority)."),
         input,
         fallback: async () => ({
@@ -526,51 +507,15 @@ const buildGraph = (deps: PipelineDeps, ctx: AgentContext, budget: TimeoutBudget
       );
       return { proposal, proposalCreatedAtIso: ctx.nowIso() };
     }))
-    .addNode("no_trade_direct_node", wrapNode("NoTradeDecision", async (state: TradingStateType) => {
-      if (!state.proposal || state.proposal.proposal_type !== "no_trade") {
-        throw new Error("no-trade proposal required for no_trade_direct_node");
-      }
-      const riskDecision: RiskDecision = {
-        action: "reject",
-        approved: false,
-        approved_position_size_pct_equity: 0,
-        risk_score_raw: 0,
-        risk_score_normalized: 0,
-        risk_band: "low",
-        evaluation_state: "not_applicable",
-        binding_constraints: ["no_trade_abstain"],
-        reasons: state.proposal.reasons,
-      };
-      const portfolioDecision: PortfolioDecision = {
-        approved: false,
-        approved_position_size_pct_equity: 0,
-        approved_notional_usd: 0,
-        concentration_check: "not_applicable",
-        correlation_check: "not_applicable",
-        reserve_cash_check: "not_applicable",
-        reasons: state.proposal.reasons,
-      };
-      const executionDecision: ExecutionDecision = {
-        portfolio_approved: false,
-        executable: false,
-        approved_notional_usd: 0,
-        execution_blocker: "no_trade",
-        execution_instructions: null,
-        reasons: state.proposal.reasons,
-      };
-      return { riskDecision, portfolioDecision, executionDecision };
-    }))
     .addNode("risk_node", wrapNode("RiskManager", async (state: TradingStateType) => {
       if (!state.proposal || !state.snapshot || !state.analysts) throw new Error("proposal, snapshot, and analysts are required for risk");
-      if (state.proposal.proposal_type !== "trade") {
-        throw new Error("risk_node requires trade proposal");
-      }
       const atrPct = state.snapshot.lastPrice === 0 ? 0 : (state.analysts.technical.features.atr14 / state.snapshot.lastPrice) * 100;
       const input = {
         proposal: state.proposal,
         portfolio: state.portfolio,
         rules: state.riskRules,
         atrPct,
+        minOrderNotionalUsd: state.snapshot.market_constraints?.min_notional_usd ?? deps.minOrderNotionalUsd ?? 0,
         regimeState: state.analysts.technical.regime.state,
         calibratedProbability: state.analysts.technical.signals.calibrated_probability,
       };
@@ -584,7 +529,14 @@ const buildGraph = (deps: PipelineDeps, ctx: AgentContext, budget: TimeoutBudget
           decision_rationale: "Fallback deterministic risk control",
         }),
       });
-      const guarded = enforceRiskHardGuards(result.output.output as RiskDecision, state.proposal, state.portfolio, state.riskRules, atrPct);
+      const guarded = enforceRiskHardGuards(
+        result.output.output as RiskDecision,
+        state.proposal,
+        state.portfolio,
+        state.riskRules,
+        atrPct,
+        input.minOrderNotionalUsd,
+      );
       await appendAndNotify(deps, ctx.runId, ctx.traceId, "RiskManager", ctx.nowIso(), input as unknown as JSONValue, guarded as unknown as JSONValue, `${result.output.decision_rationale}; hard guards applied`, result.source, result.retries);
       await runJournalingHook(() =>
         deps.journalingAgent!.onRiskEvaluated(ctx, {
@@ -621,6 +573,11 @@ const buildGraph = (deps: PipelineDeps, ctx: AgentContext, budget: TimeoutBudget
       if (!state.proposal || !state.portfolioDecision) throw new Error("proposal and portfolio decision are required for execution controller");
       const input = {
         proposal: state.proposal,
+        portfolio: { equityUsd: state.portfolio.equityUsd, liquidityUsd: state.portfolio.liquidityUsd },
+        riskRules: {
+          maxRiskPerTradeUsd: state.riskRules.maxRiskPerTradeUsd,
+          riskUsdTolerance: state.riskRules.riskUsdTolerance,
+        },
         portfolioDecision: state.portfolioDecision,
         minOrderNotionalUsd: state.snapshot?.market_constraints?.min_notional_usd ?? deps.minOrderNotionalUsd ?? 0,
         precisionStep: state.snapshot?.market_constraints?.precision_step ?? deps.minOrderPrecisionStep ?? 0,
@@ -633,6 +590,185 @@ const buildGraph = (deps: PipelineDeps, ctx: AgentContext, budget: TimeoutBudget
       const guarded = enforceExecutionHardGuards(raw, state.portfolioDecision);
       return { executionDecision: guarded };
     }))
+    .addNode("final_decision_llm_node", wrapNode("FinalDecisionLLM", async (state: TradingStateType) => {
+      if (!state.snapshot || !state.debate || !state.proposal || !state.riskDecision || !state.portfolioDecision || !state.executionDecision) {
+        throw new Error("snapshot, debate, proposal, risk, portfolio and execution advisories are required");
+      }
+
+      const advisorySnapshot: AdvisorySnapshot = {
+        asset: state.snapshot.asset,
+        timeframe: state.query.timeframe,
+        market_price: state.snapshot.lastPrice,
+        debate: state.debate,
+        proposal_advisory: state.proposal,
+        risk_advisory: state.riskDecision,
+        portfolio_advisory: state.portfolioDecision,
+        execution_advisory: state.executionDecision,
+      };
+      advisorySnapshotSchema.parse(advisorySnapshot);
+
+      const decisionResult = await deps.decisionRunner.runWithMandatoryTool({
+        config: { nodeName: "FinalDecisionLLM", maxRetries: nodeMaxRetries },
+        schema: finalDecisionToolArgsSchema,
+        toolName: "final_decision_tool",
+        systemPrompt: llmPrompt(
+          "FinalDecisionLLM",
+          "You must call final_decision_tool. You are final authority. Advisory inputs are non-binding. If action overrides advisory reject/non-executable states, override_trace must explain each override.",
+        ),
+        input: {
+          advisory_snapshot: advisorySnapshot,
+          policy: {
+            final_authority: "llm",
+            advisory_only: ["proposal", "risk", "portfolio", "execution"],
+            execution_boundary: "mechanical_validity_is_deterministic",
+          },
+        },
+        trace: { traceId: ctx.traceId, runId: ctx.runId, mode: ctx.mode, asset: ctx.asset },
+      });
+
+      if ("aborted" in decisionResult && decisionResult.aborted) {
+        const abortPayload: LLMDecisionAbort = {
+          decision_origin: "llm_abort",
+          abort: true,
+          error_code: "llm_tool_call_failed",
+          reason: decisionResult.reason,
+          retries_exhausted: decisionResult.retriesExhausted,
+        };
+        llmDecisionAbortSchema.parse(abortPayload);
+        await appendAndNotify(
+          deps,
+          ctx.runId,
+          ctx.traceId,
+          "FinalDecisionLLM",
+          ctx.nowIso(),
+          advisorySnapshot as unknown as JSONValue,
+          abortPayload as unknown as JSONValue,
+          abortPayload.reason,
+          "fallback",
+          decisionResult.retriesExhausted,
+        );
+
+        const proposal: ProposalDecision = {
+          proposal_type: "no_trade",
+          asset: state.snapshot.asset,
+          input_timeframe: state.query.timeframe,
+          decision_horizon: state.debate.dominant_horizon,
+          reasons: [abortPayload.reason, "Terminal abort selected after mandatory tool-call retries exhausted."],
+          must_monitor_conditions: state.debate.must_monitor_conditions,
+          confidence: state.debate.confidence,
+        };
+        proposalDecisionSchema.parse(proposal);
+
+        const executionDecision: ExecutionDecision = {
+          execution_venue: "futures",
+          portfolio_approved: false,
+          executable: false,
+          approved_notional_usd: 0,
+          risk_budget_usd: null,
+          effective_risk_usd: null,
+          required_margin_usd: null,
+          leverage_used: null,
+          execution_blocker: "llm_abort",
+          execution_instructions: null,
+          reasons: proposal.reasons,
+        };
+        executionDecisionSchema.parse(executionDecision);
+        return {
+          advisorySnapshot,
+          llmDecisionAbort: abortPayload,
+          noTradeDecision: {
+            no_trade: true,
+            reasons: proposal.reasons,
+            dominant_horizon: state.debate.dominant_horizon,
+            confidence: state.debate.confidence,
+            must_monitor_conditions: state.debate.must_monitor_conditions,
+          },
+          proposal,
+          executionDecision,
+        };
+      }
+
+      const finalDecision = finalDecisionByLLMSchema.parse({
+        ...decisionResult.output,
+        decision_origin: "llm_tool_call",
+      });
+      finalDecisionByLLMSchema.parse(finalDecision);
+
+      const mustOverrideRisk = !state.riskDecision.approved && finalDecision.action === "execute_trade";
+      const mustOverridePortfolio = !state.portfolioDecision.approved && finalDecision.action === "execute_trade";
+      const mustOverrideExecution = !state.executionDecision.executable && finalDecision.action === "execute_trade";
+      const hasRequiredOverrides = !mustOverrideRisk && !mustOverridePortfolio && !mustOverrideExecution
+        ? true
+        : finalDecision.override_trace.length > 0;
+      if (!hasRequiredOverrides) {
+        throw new Error("FinalDecisionLLM invalid: override_trace required when overriding advisory rejects.");
+      }
+
+      let proposal: ProposalDecision = state.proposal;
+      if (finalDecision.action === "no_trade") {
+        proposal = {
+          proposal_type: "no_trade",
+          asset: state.snapshot.asset,
+          input_timeframe: state.query.timeframe,
+          decision_horizon: state.debate.dominant_horizon,
+          reasons: finalDecision.reasons,
+          must_monitor_conditions: finalDecision.must_monitor_conditions,
+          confidence: finalDecision.final_confidence,
+        };
+      }
+      proposalDecisionSchema.parse(proposal);
+
+      let finalExecutionDecision: ExecutionDecision;
+      if (finalDecision.action === "no_trade") {
+        finalExecutionDecision = {
+          execution_venue: "futures",
+          portfolio_approved: false,
+          executable: false,
+          approved_notional_usd: 0,
+          risk_budget_usd: state.executionDecision.risk_budget_usd ?? null,
+          effective_risk_usd: state.executionDecision.effective_risk_usd ?? null,
+          required_margin_usd: state.executionDecision.required_margin_usd ?? null,
+          leverage_used: state.executionDecision.leverage_used ?? null,
+          execution_blocker: "no_trade",
+          execution_instructions: null,
+          reasons: finalDecision.reasons,
+        };
+      } else {
+        finalExecutionDecision = {
+          ...state.executionDecision,
+          reasons: [...state.executionDecision.reasons, ...finalDecision.reasons],
+        };
+      }
+      executionDecisionSchema.parse(finalExecutionDecision);
+
+      const finalPayload = {
+        ...finalDecision,
+        advisory_diff: {
+          risk_override: mustOverrideRisk,
+          portfolio_override: mustOverridePortfolio,
+          execution_override: mustOverrideExecution,
+        },
+      };
+      await appendAndNotify(
+        deps,
+        ctx.runId,
+        ctx.traceId,
+        "FinalDecisionLLM",
+        ctx.nowIso(),
+        advisorySnapshot as unknown as JSONValue,
+        finalPayload as unknown as JSONValue,
+        decisionResult.decisionRationale,
+        decisionResult.source,
+        decisionResult.retries,
+      );
+
+      return {
+        advisorySnapshot,
+        finalDecisionByLLM: finalDecision,
+        proposal,
+        executionDecision: finalExecutionDecision,
+      };
+    }))
     .addNode("execution_terminal", wrapNode("SimulatedExchange", async (state: TradingStateType) => {
       if (!state.executionDecision || !state.proposal || !state.snapshot) throw new Error("execution decision, proposal, and snapshot are required for execution");
       const executionReport = await deps.agents.simulatedExchange.run(
@@ -644,6 +780,9 @@ const buildGraph = (deps: PipelineDeps, ctx: AgentContext, budget: TimeoutBudget
           decision: state.executionDecision!,
           report: executionReport,
           proposal: state.proposal!,
+          advisorySnapshot: state.advisorySnapshot,
+          finalDecisionByLLM: state.finalDecisionByLLM,
+          llmDecisionAbort: state.llmDecisionAbort,
         }),
       );
       return { executionReport };
@@ -689,16 +828,11 @@ const buildGraph = (deps: PipelineDeps, ctx: AgentContext, budget: TimeoutBudget
     .addEdge("bullish_research_node", "bearish_research_node")
     .addEdge("bearish_research_node", "debate_node")
     .addEdge("debate_node", "trader_node")
-    .addConditionalEdges("trader_node", (state: TradingStateType) => {
-      if (state.proposal?.proposal_type === "no_trade") {
-        return "no_trade_direct_node";
-      }
-      return "risk_node";
-    })
-    .addEdge("no_trade_direct_node", "execution_terminal")
+    .addEdge("trader_node", "risk_node")
     .addEdge("risk_node", "portfolio_node")
     .addEdge("portfolio_node", "execution_controller_node")
-    .addEdge("execution_controller_node", "execution_terminal")
+    .addEdge("execution_controller_node", "final_decision_llm_node")
+    .addEdge("final_decision_llm_node", "execution_terminal")
     .addEdge("execution_terminal", "post_trade_evaluator_node")
     .addEdge("post_trade_evaluator_node", END);
 
@@ -733,6 +867,9 @@ export class TradingPipeline {
         proposal: null,
         riskDecision: null,
         portfolioDecision: null,
+        advisorySnapshot: null,
+        finalDecisionByLLM: null,
+        llmDecisionAbort: null,
         executionDecision: null,
         executionReport: null,
         postTradeEvaluation: null,
@@ -757,6 +894,10 @@ export class TradingPipeline {
     }
     return {
       traceId,
+      decisionOrigin: finalState.llmDecisionAbort ? "llm_abort" : "llm_tool_call",
+      finalDecisionByLLM: finalState.finalDecisionByLLM,
+      llmDecisionAbort: finalState.llmDecisionAbort,
+      advisorySnapshot: finalState.advisorySnapshot,
       executionDecision: finalState.executionDecision,
       executionReport: finalState.executionReport,
       postTradeEvaluation: finalState.postTradeEvaluation,

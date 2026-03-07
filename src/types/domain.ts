@@ -400,6 +400,41 @@ export interface DebateOutput {
   confidence: ConfidenceVector;
 }
 
+export interface AdvisorySnapshot {
+  asset: string;
+  timeframe: string;
+  market_price: number;
+  debate: DebateOutput;
+  proposal_advisory: ProposalDecision;
+  risk_advisory: RiskDecision;
+  portfolio_advisory: PortfolioDecision;
+  execution_advisory: ExecutionDecision;
+}
+
+export interface OverrideTrace {
+  advisory_source: "proposal" | "risk" | "portfolio" | "execution";
+  advisory_signal: string;
+  llm_signal: string;
+  reason: string;
+}
+
+export interface FinalDecisionByLLM {
+  decision_origin: "llm_tool_call";
+  action: "execute_trade" | "no_trade";
+  reasons: string[];
+  override_trace: OverrideTrace[];
+  final_confidence: ConfidenceVector;
+  must_monitor_conditions: string[];
+}
+
+export interface LLMDecisionAbort {
+  decision_origin: "llm_abort";
+  abort: true;
+  error_code: "llm_tool_call_failed";
+  reason: string;
+  retries_exhausted: number;
+}
+
 export interface NoTradeDecision {
   no_trade: true;
   reasons: string[];
@@ -412,15 +447,20 @@ export interface TradeProposal {
   proposal_type: "trade";
   asset: string;
   side: "long" | "short";
+  execution_venue: "futures";
+  leverage: number;
   entry: number;
   stop_loss: number;
   take_profit_targets: number[];
+  tp_partial_close_pct: number[];
+  move_stop_to_breakeven_after_tp1: boolean;
   suggested_position_size_pct_equity: number;
   input_timeframe: string;
   decision_horizon: EvidenceHorizon;
   expected_holding_period_hours: number;
   risk_reward_ratio: number;
   stop_distance_pct: number;
+  stop_distance_fraction: number;
   take_profit_distance_pct: number;
   structural_invalidation_level: number;
   thesis: string[];
@@ -445,6 +485,12 @@ export type ProposalDecision = TradeProposal | NoTradeProposal;
 
 export interface RiskRules {
   maxRiskPerTradePct: number;
+  maxRiskPerTradeUsd?: number;
+  riskUsdTolerance?: number;
+  rrMinThreshold?: number;
+  futuresMaxLeverage?: number;
+  tpPartialSplit?: number[];
+  tpBreakevenAfterTp1?: boolean;
   maxExposurePct: number;
   drawdownCutoffPct: number;
   maxAtrPct: number;
@@ -477,10 +523,13 @@ export interface RiskDecision {
 }
 
 export interface ExecutionInstruction {
+  venue: "futures";
   type: "market" | "limit";
   tif: "IOC" | "GTC";
   side: "buy" | "sell";
+  leverage: number;
   quantity_notional_usd: number;
+  required_margin_usd?: number;
   min_notional_usd?: number;
   precision_step?: number;
   metadata_source?: "exchange" | "fallback_env";
@@ -497,9 +546,14 @@ export interface PortfolioDecision {
 }
 
 export interface ExecutionDecision {
+  execution_venue: "futures";
   portfolio_approved: boolean;
   executable: boolean;
   approved_notional_usd: number;
+  risk_budget_usd: number | null;
+  effective_risk_usd: number | null;
+  required_margin_usd: number | null;
+  leverage_used: number | null;
   execution_blocker: string | null;
   execution_instructions: ExecutionInstruction | null;
   reasons: string[];

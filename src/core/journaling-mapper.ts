@@ -1,6 +1,9 @@
 import type {
+  AdvisorySnapshot,
   ExecutionDecision,
   ExecutionReport,
+  FinalDecisionByLLM,
+  LLMDecisionAbort,
   PipelineMode,
   PortfolioDecision,
   PostTradeEvaluation,
@@ -50,6 +53,9 @@ export const mapExecutionDecided = (input: {
   decision: ExecutionDecision;
   report?: ExecutionReport;
   proposal: ProposalDecision;
+  advisorySnapshot?: AdvisorySnapshot | null;
+  finalDecisionByLLM?: FinalDecisionByLLM | null;
+  llmDecisionAbort?: LLMDecisionAbort | null;
 }): Record<string, unknown> => ({
   stage: "execution_decided",
   execution_decision: input.decision,
@@ -61,6 +67,9 @@ export const mapExecutionDecided = (input: {
         slippage_bps: safeNum(input.report.execution_details?.slippage_bps),
       }
     : null,
+  advisory_snapshot: input.advisorySnapshot ?? null,
+  final_decision_llm: input.finalDecisionByLLM ?? null,
+  llm_decision_abort: input.llmDecisionAbort ?? null,
   proposal_ref: input.proposal,
 });
 

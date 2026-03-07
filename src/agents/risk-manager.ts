@@ -14,6 +14,7 @@ export interface RiskInput {
   portfolio: PortfolioState;
   rules: RiskRules;
   atrPct: number;
+  minOrderNotionalUsd?: number;
   regimeState?: "low_vol" | "trend" | "high_vol_news";
   calibratedProbability?: number;
 }
@@ -43,10 +44,30 @@ export class RiskManager extends BaseAgent<RiskInput, RiskDecision> {
     }
     const reasons: string[] = [];
     const binding: string[] = [];
+    const rrMinThreshold = Math.max(0, input.rules.rrMinThreshold ?? 1.5);
+    const riskTolerance = Math.max(1, input.rules.riskUsdTolerance ?? 1.1);
+    const stopDistanceFrac = Math.max(input.proposal.stop_distance_fraction, 1e-9);
+    const stopDistancePct = stopDistanceFrac * 100;
+    const minNotional = Math.max(0, input.minOrderNotionalUsd ?? 0);
+    const maxRiskUsd = Math.max(0, input.rules.maxRiskPerTradeUsd ?? 0);
+    const notionalByRiskUsd = maxRiskUsd > 0 ? maxRiskUsd / stopDistanceFrac : Number.POSITIVE_INFINITY;
+    const targetNotional = Math.max(notionalByRiskUsd, minNotional);
+    const impliedRiskUsd = targetNotional * stopDistanceFrac;
+    let approvedSize = (targetNotional / Math.max(input.portfolio.equityUsd, 1e-9)) * 100;
 
-    const stopDistancePct = Math.abs(input.proposal.entry - input.proposal.stop_loss) / Math.max(input.proposal.entry, 1e-9) * 100;
-    const maxSizeByRisk = input.rules.maxRiskPerTradePct / Math.max(stopDistancePct, 0.0001);
-    let approvedSize = Math.min(input.proposal.suggested_position_size_pct_equity, maxSizeByRisk);
+    if (input.proposal.risk_reward_ratio < rrMinThreshold) {
+      approvedSize = 0;
+      reasons.push(`RR gate failed: ${round(input.proposal.risk_reward_ratio, 3)} < ${round(rrMinThreshold, 3)}.`);
+      binding.push("rrMinThreshold");
+    }
+
+    if (maxRiskUsd > 0 && impliedRiskUsd > maxRiskUsd * riskTolerance) {
+      approvedSize = 0;
+      reasons.push(
+        `Min notional forces oversized risk: implied_risk_usd=${round(impliedRiskUsd, 4)} > limit=${round(maxRiskUsd * riskTolerance, 4)}.`,
+      );
+      binding.push("riskUsdTolerance");
+    }
 
     if (input.portfolio.currentExposurePct + approvedSize > input.rules.maxExposurePct) {
       approvedSize = Math.max(0, input.rules.maxExposurePct - input.portfolio.currentExposurePct);
@@ -61,21 +82,9 @@ export class RiskManager extends BaseAgent<RiskInput, RiskDecision> {
     }
 
     if (input.atrPct > input.rules.maxAtrPct) {
-      approvedSize *= 0.5;
+      approvedSize = 0;
       reasons.push("Volatility above ATR threshold.");
       binding.push("maxAtrPct");
-    }
-
-    if (input.regimeState === "high_vol_news") {
-      approvedSize *= 0.6;
-      reasons.push("Regime high_vol_news: reduced size for tail-risk control.");
-      binding.push("regimeHardening");
-    }
-
-    if ((input.calibratedProbability ?? 0.5) < 0.45) {
-      approvedSize *= 0.7;
-      reasons.push("Low calibrated technical probability.");
-      binding.push("probabilityQuality");
     }
 
     if (input.portfolio.liquidityUsd < input.rules.minLiquidityUsd) {
@@ -84,11 +93,16 @@ export class RiskManager extends BaseAgent<RiskInput, RiskDecision> {
       binding.push("minLiquidityUsd");
     }
 
+    if (maxRiskUsd > 0) {
+      reasons.push(
+        `Risk sizing: stop_pct=${round(stopDistancePct, 4)} target_notional=${round(targetNotional, 4)} implied_risk_usd=${round(impliedRiskUsd, 4)}.`,
+      );
+      binding.push("maxRiskPerTradeUsd");
+    }
+
     const approved = approvedSize >= 0.2;
     const action = approved ? (approvedSize < input.proposal.suggested_position_size_pct_equity ? "reduce" : "approve") : "reject";
-    if (!approved && reasons.length === 0) {
-      reasons.push("Position size below minimum threshold after risk normalization.");
-    }
+    if (!approved && reasons.length === 0) reasons.push("Position size below minimum threshold after risk normalization.");
 
     const raw = round(
       clamp(

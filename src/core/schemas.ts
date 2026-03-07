@@ -164,6 +164,13 @@ export const debateOutputSchema = z.object({
   confidence: confidenceVectorSchema,
 });
 
+export const overrideTraceSchema = z.object({
+  advisory_source: z.enum(["proposal", "risk", "portfolio", "execution"]),
+  advisory_signal: z.string().min(1),
+  llm_signal: z.string().min(1),
+  reason: z.string().min(3),
+});
+
 export const noTradeDecisionSchema = z.object({
   no_trade: z.literal(true),
   reasons: z.array(z.string()),
@@ -176,15 +183,20 @@ export const tradeProposalSchema = z.object({
   proposal_type: z.literal("trade"),
   asset: z.string(),
   side: z.enum(["long", "short"]),
+  execution_venue: z.literal("futures"),
+  leverage: z.number().min(1),
   entry: z.number(),
   stop_loss: z.number(),
   take_profit_targets: z.array(z.number()).min(1),
+  tp_partial_close_pct: z.array(z.number().min(0)).min(1),
+  move_stop_to_breakeven_after_tp1: z.boolean(),
   suggested_position_size_pct_equity: z.number().min(0),
   input_timeframe: z.string(),
   decision_horizon: z.enum(["scalp", "intraday", "swing", "position"]),
   expected_holding_period_hours: z.number().min(0),
   risk_reward_ratio: z.number().min(0),
   stop_distance_pct: z.number().min(0),
+  stop_distance_fraction: z.number().min(0),
   take_profit_distance_pct: z.number().min(0),
   structural_invalidation_level: z.number(),
   thesis: z.array(z.string()),
@@ -233,22 +245,61 @@ export const portfolioDecisionSchema = z.object({
 });
 
 export const executionDecisionSchema = z.object({
+  execution_venue: z.literal("futures"),
   portfolio_approved: z.boolean(),
   executable: z.boolean(),
   approved_notional_usd: z.number().min(0),
+  risk_budget_usd: z.number().min(0).nullable(),
+  effective_risk_usd: z.number().min(0).nullable(),
+  required_margin_usd: z.number().min(0).nullable(),
+  leverage_used: z.number().min(1).nullable(),
   execution_blocker: z.string().nullable(),
   execution_instructions: z
     .object({
+      venue: z.literal("futures"),
       type: z.enum(["market", "limit"]),
       tif: z.enum(["IOC", "GTC"]),
       side: z.enum(["buy", "sell"]),
+      leverage: z.number().min(1),
       quantity_notional_usd: z.number().min(0),
+      required_margin_usd: z.number().min(0).optional(),
       min_notional_usd: z.number().min(0).optional(),
       precision_step: z.number().min(0).optional(),
       metadata_source: z.enum(["exchange", "fallback_env"]).optional(),
     })
     .nullable(),
   reasons: z.array(z.string()),
+});
+
+export const advisorySnapshotSchema = z.object({
+  asset: z.string(),
+  timeframe: z.string(),
+  market_price: z.number().min(0),
+  debate: debateOutputSchema,
+  proposal_advisory: proposalDecisionSchema,
+  risk_advisory: riskDecisionSchema,
+  portfolio_advisory: portfolioDecisionSchema,
+  execution_advisory: executionDecisionSchema,
+});
+
+export const finalDecisionToolArgsSchema = z.object({
+  action: z.enum(["execute_trade", "no_trade"]),
+  reasons: z.array(z.string().min(1)).min(1),
+  override_trace: z.array(overrideTraceSchema),
+  final_confidence: confidenceVectorSchema,
+  must_monitor_conditions: z.array(z.string()),
+});
+
+export const finalDecisionByLLMSchema = finalDecisionToolArgsSchema.extend({
+  decision_origin: z.literal("llm_tool_call"),
+});
+
+export const llmDecisionAbortSchema = z.object({
+  decision_origin: z.literal("llm_abort"),
+  abort: z.literal(true),
+  error_code: z.literal("llm_tool_call_failed"),
+  reason: z.string().min(3),
+  retries_exhausted: z.number().min(0),
 });
 
 export const postTradeEvaluationSchema = z.object({

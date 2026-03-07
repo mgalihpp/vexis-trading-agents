@@ -15,7 +15,6 @@ import {
   TechnicalAnalyst,
   TraderAgent
 } from "./agents";
-import { defaultRiskRules } from "./config/risk";
 import { BinanceAccountProvider, StaticPortfolioStateProvider } from "./core/account-state";
 import { loadRuntimeConfigWithMeta } from "./core/env";
 import { InMemoryEventStore, SqliteEventStorePersistence } from "./core/event-store";
@@ -198,6 +197,20 @@ export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => 
     }
   });
 
+  const riskRules = {
+    maxRiskPerTradeUsd: runtime.riskMaxPerTradeUsd,
+    maxRiskPerTradePct: runtime.riskMaxPerTradePct,
+    riskUsdTolerance: runtime.riskUsdTolerance,
+    rrMinThreshold: runtime.rrMinThreshold,
+    futuresMaxLeverage: runtime.futuresMaxLeverage,
+    tpPartialSplit: runtime.tpPartialSplit,
+    tpBreakevenAfterTp1: runtime.tpBreakevenAfterTp1,
+    maxExposurePct: runtime.riskMaxExposurePct,
+    drawdownCutoffPct: runtime.riskDrawdownCutoffPct,
+    maxAtrPct: runtime.riskMaxAtrPct,
+    minLiquidityUsd: runtime.riskMinLiquidityUsd,
+  };
+
   const journalingAgent = runtime.journalingEnabled
     ? new JournalingAgent(
         new HttpJournalingClient({
@@ -225,7 +238,7 @@ export const runApp = async (overrides: AppRunOverrides = {}): Promise<void> => 
     healthMonitor,
     marketDataProvider,
     decisionRunner,
-    riskRules: defaultRiskRules,
+    riskRules,
     llmMaxRetries: runtime.llmMaxRetries,
     runTimeoutMs: runtime.runTimeoutMs,
     nodeTimeoutMs: runtime.nodeTimeoutMs,
