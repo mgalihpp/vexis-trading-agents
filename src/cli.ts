@@ -1277,6 +1277,16 @@ const promptFuturesScope = async (fallback: FuturesScope): Promise<FuturesScope>
     default: fallback
   })) as FuturesScope;
 
+const futuresAmountPrompt = (scope: FuturesScope): string =>
+  scope === "usdm"
+    ? "Order size (quantity; base/contract units, not margin USDT)"
+    : "Order size (contracts only)";
+
+const futuresProtectAmountPrompt = (scope: FuturesScope): string =>
+  scope === "usdm"
+    ? "Amount to protect (quantity in base/contract units)"
+    : "Amount to protect (contracts only)";
+
 const runFuturesInteractive = async (
   global: CliGlobalOptions,
   runtime: RuntimeConfig,
@@ -1320,7 +1330,7 @@ const runFuturesInteractive = async (
             { name: "Limit", value: "limit" }
           ]
         })) as "market" | "limit";
-        const amount = await promptFloat("Amount (contracts/base)", 0.001);
+        const amount = await promptFloat(futuresAmountPrompt(scope), scope === "coinm" ? 1 : 0.001);
         const price = type === "limit" ? await promptFloat("Limit price", 100000) : undefined;
         const stopLoss = await promptFloat("Stop-loss price (optional)");
         const takeProfit = await promptFloat("Take-profit price (optional)");
@@ -1426,7 +1436,7 @@ const runFuturesInteractive = async (
             { name: "\u{1F534} Sell/Short", value: "sell" }
           ]
         })) as "buy" | "sell";
-        const amount = await promptFloat("Amount to protect (contracts or base coin)", 0.001);
+        const amount = await promptFloat(futuresProtectAmountPrompt(scope), scope === "coinm" ? 1 : 0.001);
         const stopLoss = await promptFloat("Stop-loss price (optional)");
         const takeProfit = await promptFloat("Take-profit price (optional)");
         const result = await withLoading("Arming futures protection", async () =>

@@ -186,6 +186,20 @@ const isNativeProtectionApplied = (
   return slApplied && tpApplied;
 };
 
+const isIgnorableFuturesSetupError = (error: unknown): boolean => {
+  const { code, message } = extractErrorCodeAndMessage(error);
+  const serialized = JSON.stringify(error).toLowerCase();
+  const haystack = `${code} ${message} ${serialized}`;
+  const ignorableCodes = ["-4059", "-4046"];
+  if (ignorableCodes.some((c) => haystack.includes(c))) return true;
+  return [
+    "no need to change position side",
+    "no need to change margin type",
+    "already set",
+    "no need to change",
+  ].some((token) => haystack.includes(token));
+};
+
 const toIso = (row: { datetime?: string; timestamp?: number }): string => {
   if (row.datetime) return String(row.datetime);
   if (typeof row.timestamp === "number") return new Date(row.timestamp).toISOString();
@@ -1223,25 +1237,37 @@ export class BinanceFuturesTradingService {
     const client = this.getClient(scope);
     const params = { recvWindow: this.recvWindow };
     if (client.setPositionMode) {
-      await withTimeout(
-        client.setPositionMode(this.config.positionMode === "hedge", symbol, params),
-        this.timeoutMs,
-        "BINANCE_FUTURES_SET_POSITION_MODE_TIMEOUT"
-      );
+      try {
+        await withTimeout(
+          client.setPositionMode(this.config.positionMode === "hedge", symbol, params),
+          this.timeoutMs,
+          "BINANCE_FUTURES_SET_POSITION_MODE_TIMEOUT"
+        );
+      } catch (error) {
+        if (!isIgnorableFuturesSetupError(error)) throw error;
+      }
     }
     if (client.setMarginMode) {
-      await withTimeout(
-        client.setMarginMode(this.config.marginMode, symbol, params),
-        this.timeoutMs,
-        "BINANCE_FUTURES_SET_MARGIN_MODE_TIMEOUT"
-      );
+      try {
+        await withTimeout(
+          client.setMarginMode(this.config.marginMode, symbol, params),
+          this.timeoutMs,
+          "BINANCE_FUTURES_SET_MARGIN_MODE_TIMEOUT"
+        );
+      } catch (error) {
+        if (!isIgnorableFuturesSetupError(error)) throw error;
+      }
     }
     if (client.setLeverage) {
-      await withTimeout(
-        client.setLeverage(this.config.defaultLeverage, symbol, params),
-        this.timeoutMs,
-        "BINANCE_FUTURES_SET_LEVERAGE_TIMEOUT"
-      );
+      try {
+        await withTimeout(
+          client.setLeverage(this.config.defaultLeverage, symbol, params),
+          this.timeoutMs,
+          "BINANCE_FUTURES_SET_LEVERAGE_TIMEOUT"
+        );
+      } catch (error) {
+        if (!isIgnorableFuturesSetupError(error)) throw error;
+      }
     }
     done.add(symbol);
   }
